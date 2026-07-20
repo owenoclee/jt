@@ -20,6 +20,8 @@ import { UserError } from "./errors.ts";
 import { JiraApiError } from "./jira/client.ts";
 import { bold, red } from "./render/colors.ts";
 
+export const VERSION = "0.1.0";
+
 const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit → diff → commit → push)
 
   workspace
@@ -99,6 +101,10 @@ async function main(): Promise<void> {
       return cmdLog(rest);
     case "schema":
       return cmdSchema();
+    case "version":
+    case "--version":
+      console.log(`jt ${VERSION}`);
+      return;
     case "help":
     case "--help":
     case "-h":

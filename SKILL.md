@@ -45,6 +45,15 @@ humans running it directly in a normal terminal.
 `jt commit -m` messages become the round history on the page — write them for the
 reviewer. Plain `jt push` (no browser gate) still exists for non-interactive use.
 
+**Parked work and session starts.** Uncommitted edits (including anything the user
+asked to `jt uncommit`) live indefinitely in the working files as `modified` — that is
+their intended resting place, like a dirty git working tree. Begin every session with
+`jt status`: parked tickets from earlier sessions will be listed. Treat them as NOT
+yours to ship — when parked work exists, commit by explicit ID (`jt commit SCRUM-7`),
+never a blanket `jt commit`, unless the user confirms the parked work should ride
+along. `jt diff <ID>` shows what a parked ticket is waiting to do; `jt restore <ID>`
+abandons it.
+
 **Push is tamper-proof by construction**: it compiles from the tool-owned committed
 layer, never from working files. Editing a working file after `jt commit` does not
 change what push sends — it just shows up as a new uncommitted change afterwards.

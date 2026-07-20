@@ -271,6 +271,19 @@ export function renderPage(model: ReviewPageModel): string {
       document.getElementById('countdown').textContent =
         left > 0 ? 'times out in ' + m + 'm ' + String(s).padStart(2, '0') + 's' : 'timed out';
     }, 500);
+    // Feedback and approval are mutually exclusive: any non-empty note blocks approve.
+    const approveBtn = document.getElementById('approve');
+    const approveLabel = approveBtn.textContent;
+    function refreshButtons() {
+      const n = Object.keys(notes()).length;
+      approveBtn.disabled = n > 0;
+      approveBtn.textContent = n > 0
+        ? 'Approve blocked — ' + n + ' note' + (n === 1 ? '' : 's') + ' pending'
+        : approveLabel;
+      approveBtn.title = n > 0 ? 'Clear the feedback notes to approve, or Request changes.' : '';
+    }
+    document.addEventListener('input', refreshButtons);
+    refreshButtons();
     async function send(decision) {
       const res = await fetch('/decide/' + nonce, {
         method: 'POST',
@@ -411,7 +424,8 @@ details.ops pre { font-size: 11px; overflow-x: auto; }
 .sendbar { position: fixed; bottom: 0; left: 0; right: 0; display: flex; gap: 12px; align-items: center; justify-content: flex-end; padding: 12px 20px; background: var(--card); border-top: 1px solid var(--border); }
 #countdown { color: var(--muted); font-size: 13px; margin-right: auto; }
 #approve { background: var(--add-fg); color: #fff; border: none; border-radius: 6px; padding: 8px 18px; font: inherit; font-weight: 600; cursor: pointer; }
+#approve:disabled { background: var(--card); color: var(--muted); border: 1px solid var(--border); cursor: not-allowed; }
 #request { background: none; color: var(--del-fg); border: 1px solid var(--del-fg); border-radius: 6px; padding: 8px 18px; font: inherit; font-weight: 600; cursor: pointer; }
-#approve:hover, #request:hover { filter: brightness(1.1); }
+#approve:hover:not(:disabled), #request:hover { filter: brightness(1.1); }
 .done { display: flex; align-items: center; justify-content: center; height: 80vh; font-size: 16px; color: var(--muted); padding: 20px; text-align: center; }
 `;

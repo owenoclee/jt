@@ -5,6 +5,20 @@ desired state; the tool computes diffs, the user reviews them, and `jt push` com
 the approved state into API calls. You never author API payloads and never re-type
 JSON into a tool call — the file on disk is the single unit of intent.
 
+## The workspace
+
+A workspace is any directory initialized with `jt init` — that writes
+`.jira/config.json` (the marker) and creates `tickets/` beside it. Like git, every
+jt command discovers the workspace by walking UP from the current working directory
+until it finds `.jira/config.json`, so jt works from anywhere inside the tree;
+`tickets/` always means `<workspace-root>/tickets/`. Outside any workspace, commands
+fail with "not a jt workspace — run: jt init".
+
+Put the workspace wherever suits the session — an agent scratchpad for throwaway
+work, or a durable directory (e.g. `~/jira/<project>/`) when ticket state should
+persist across sessions. One workspace per Jira project is the normal shape; check
+for an existing one before initializing a new one.
+
 ## The workflow contract
 
 ```

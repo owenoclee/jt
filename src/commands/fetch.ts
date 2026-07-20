@@ -1,11 +1,54 @@
 // deno-lint-ignore-file no-explicit-any
 import { parseArgs } from "@std/cli";
+import { appendChainEntry, type ChainSnapshot, pruneChain } from "../chain.ts";
 import { localContext, withClient, withMeta } from "../context.ts";
 import { fail } from "../errors.ts";
 import { JiraApiError } from "../jira/client.ts";
 import { dim, green, red, yellow } from "../render/colors.ts";
 import { fetchBaseEntry, integrateFetched } from "../sync.ts";
 import { ticketsEqual } from "../canonical.ts";
+import type { Store } from "../store.ts";
+
+/**
+ * Integrate a fetched entry and record any committed-layer rewrite in the chain as a
+ * synthetic "remote" entry (or prune, when the rebase drained the ticket entirely).
+ */
+function integrateWithChain(
+  store: Store,
+  entry: Parameters<typeof integrateFetched>[1],
+  rebases: { key: string; fields: string[]; snapshot: ChainSnapshot }[],
+): ReturnType<typeof integrateFetched> {
+  const key = entry.key;
+  const before = store.readCommitted(key)?.bytes ?? null;
+  const result = integrateFetched(store, entry);
+  const after = store.readCommitted(key);
+  if (before !== null && after === null) {
+    pruneChain(store, [key]); // rebase made committed equal base — left the changeset
+  } else if (after && after.bytes !== before && result.kind === "rebased") {
+    rebases.push({
+      key,
+      fields: result.fields,
+      snapshot: { kind: "ticket", ticket: after.ticket },
+    });
+  }
+  return result;
+}
+
+function recordRebases(
+  store: Store,
+  rebases: { key: string; fields: string[]; snapshot: ChainSnapshot }[],
+): void {
+  if (rebases.length === 0) return;
+  const note = `rebase: remote changed ${
+    rebases.map((r) => `${r.fields.join("/")} (${r.key})`).join(", ")
+  }`;
+  appendChainEntry(
+    store,
+    "remote",
+    note,
+    Object.fromEntries(rebases.map((r) => [r.key, r.snapshot])),
+  );
+}
 
 export async function cmdFetch(argv: string[]): Promise<void> {
   const args = parseArgs(argv, { string: ["jql", "limit"] });
@@ -18,10 +61,12 @@ export async function cmdFetch(argv: string[]): Promise<void> {
   }
   if (keys.length === 0) fail("jt fetch requires issue keys or --jql '...'");
 
+  const rebases: Parameters<typeof recordRebases>[1] = [];
   for (const key of [...new Set(keys)]) {
     const entry = await fetchBaseEntry(ctx.client, ctx.meta, ctx.ws.config, key);
-    report(key, integrateFetched(ctx.store, entry));
+    report(key, integrateWithChain(ctx.store, entry, rebases));
   }
+  recordRebases(ctx.store, rebases);
 }
 
 export async function cmdPull(): Promise<void> {
@@ -32,10 +77,11 @@ export async function cmdPull(): Promise<void> {
     console.log("nothing tracked — run: jt fetch <KEY...>");
     return;
   }
+  const rebases: Parameters<typeof recordRebases>[1] = [];
   for (const key of keys) {
     try {
       const entry = await fetchBaseEntry(ctx.client, ctx.meta, ctx.ws.config, key);
-      report(key, integrateFetched(ctx.store, entry));
+      report(key, integrateWithChain(ctx.store, entry, rebases));
     } catch (e) {
       if (e instanceof JiraApiError && e.status === 404) {
         handleRemoteDeleted(ctx.store, key);
@@ -44,6 +90,7 @@ export async function cmdPull(): Promise<void> {
       }
     }
   }
+  recordRebases(ctx.store, rebases);
 }
 
 function handleRemoteDeleted(store: ReturnType<typeof localContext>["store"], key: string): void {

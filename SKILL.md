@@ -10,14 +10,25 @@ JSON into a tool call — the file on disk is the single unit of intent.
 ```
 jt fetch PROJ-123          # or: jt fetch --jql 'project = PROJ AND sprint in openSprints()'
 # edit tickets/PROJ-123.json (the ONLY files you may edit are in tickets/)
-jt diff                    # show the user what changed — they review this output
-jt commit                  # snapshot the approved state (local, safe)
-jt push                    # THE ONLY REMOTE-MUTATING COMMAND — gated by user approval
+jt diff                    # inspect what changed
+jt commit -m "round 1: …"  # stage the proposal (local, safe); -m narrates the round
+jt push --await-user       # THE ONLY REMOTE-MUTATING COMMAND — opens a browser review
+                           # page; the user approves/rejects per ticket; only approved
+                           # tickets are sent
 ```
 
-Iterate in rounds: commit tickets as the user approves them; `jt diff` then only shows
-the still-uncommitted work. When everything is committed, `jt diff --committed` shows
-the complete changeset that push will send, and `jt push` sends exactly that.
+**Prefer `jt push --await-user` whenever a human is in the loop.** It renders the
+changeset as a PR-style page (full diff, per-round commit deltas, "since your last
+review"), served by the same process that executes the push — the user's browser click
+is the approval, with no model-mediated transcription anywhere. Exit codes: `0` all
+approved and pushed · `2` some/all rejected (notes on stdout — read them, edit, commit
+a new round, push again) · `1` timeout or push failure. Run it in the background if
+your tool-call timeout is shorter than the review timeout (default 600s; `--timeout`).
+
+Iterate in rounds: rejected tickets stay committed; approved ones push immediately and
+leave the changeset, so the next review page only contains what's still in question.
+`jt commit -m` messages become the round history on the page — write them for the
+reviewer. Plain `jt push` (no browser gate) still exists for non-interactive use.
 
 **Push is tamper-proof by construction**: it compiles from the tool-owned committed
 layer, never from working files. Editing a working file after `jt commit` does not
@@ -25,8 +36,12 @@ change what push sends — it just shows up as a new uncommitted change afterwar
 
 ## Hard rules
 
-- **Never** edit anything under `.jira/` (base/committed layers, meta, journal — tool-owned).
+- **Never** edit anything under `.jira/` (base/committed layers, meta, chain, journal — tool-owned).
 - Only `jt push` mutates Jira. Everything else is local or read-only, safe to allowlist.
+- **Never open, read, or interact with the review page URL** (`http://127.0.0.1:…`)
+  with browser tools. The page exists so the HUMAN can approve out-of-band; an agent
+  clicking it defeats the entire mechanism. Localhost must not be in any browser-tool
+  allowlist. Wait for the command to exit and read its stdout instead.
 - Comments are **append-only**: add entries WITHOUT an `id`; never edit or remove
   entries that have an `id`.
 - Existing-ticket files are named `<KEY>.json` and must keep their `key` field.
@@ -86,6 +101,8 @@ parents before children, then renames the files to their real keys.
 
 - `jt show PROJ-123` renders the working copy; `--base` shows remote-as-fetched;
   `--committed` shows what's staged for push.
+- `jt diff --web` opens the current diff as a read-only browser page (same renderer
+  as the review page) — useful mid-refinement before anything is committed.
 - `jt log` renders the push journal — every API call ever sent, with responses.
 
 ## Suggested permission setup

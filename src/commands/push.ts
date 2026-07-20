@@ -4,11 +4,15 @@
  * Compiles committed−base into exact API ops (never reading the working tree), prints
  * them, checks remote staleness, executes in order, journals everything, then advances
  * the base layer by refetching what changed.
+ *
+ * --await-user hands the approval decision to a browser page served from the same
+ * process (see src/review/server.ts); only user-approved tickets execute.
  */
 // deno-lint-ignore-file no-explicit-any
 import { parseArgs } from "@std/cli";
 import { serializeTicket, ticketsEqual } from "../canonical.ts";
-import { compilePush } from "../compile.ts";
+import { pruneChain } from "../chain.ts";
+import { compilePush, type CompiledPush } from "../compile.ts";
 import { localContext, withClient, withMeta } from "../context.ts";
 import { fail } from "../errors.ts";
 import { JiraApiError, type JiraClient } from "../jira/client.ts";
@@ -23,26 +27,69 @@ import type {
   Meta,
 } from "../types.ts";
 
+export type PushContext = ReturnType<typeof localContext> & { meta: Meta; client: JiraClient };
+
 export async function cmdPush(argv: string[]): Promise<void> {
-  const args = parseArgs(argv, { boolean: ["dry-run"] });
+  const args = parseArgs(argv, {
+    boolean: ["dry-run", "await-user"],
+    string: ["timeout"],
+  });
   const ctx = withClient(withMeta(localContext()));
-  const { store, client } = ctx;
 
-  const { ops, existingKeys, warnings } = await compilePush(ctx);
+  const compiled = await compilePush(ctx);
+  await checkStaleness(ctx, compiled.existingKeys);
 
-  // Staleness guard — before printing, so what's printed is what will actually run.
+  if (args["await-user"]) {
+    const { runReviewFlow } = await import("../review/server.ts");
+    const timeoutMs = args.timeout ? Number(args.timeout) * 1000 : 600_000;
+    const outcome = await runReviewFlow(ctx, compiled, { timeoutMs });
+    // Exit codes for the agent loop: 0 = everything approved and pushed,
+    // 2 = user rejected some/all (notes on stdout), 1 = timeout or push failure.
+    if (outcome.status === "timeout" || outcome.pushFailure) Deno.exit(1);
+    if (outcome.status !== "pushed") Deno.exit(2);
+    return;
+  }
+
+  printPlan(compiled.ops, compiled.warnings);
+  if (args["dry-run"]) {
+    console.log(`\n${cyan("dry-run")} — nothing sent`);
+    return;
+  }
+
+  console.log("");
+  const result = await executePush(ctx, compiled.ops);
+  console.log("");
+  if (result.failure) {
+    console.log(
+      red(`push incomplete — ${result.okCount}/${compiled.ops.length} ops applied`),
+    );
+    console.log(dim(`journal: ${result.journalPath}`));
+    console.log(dim("local state was re-synced to what actually applied; fix and push again"));
+    Deno.exit(1);
+  }
+  const createdNote = result.refMap.size
+    ? ` · created: ${
+      [...result.refMap.entries()].map(([r, k]) => `${r} → ${bold(k)}`).join(", ")
+    }`
+    : "";
+  console.log(
+    green(`pushed ${compiled.ops.length} operation${compiled.ops.length === 1 ? "" : "s"}`) +
+      createdNote,
+  );
+  console.log(dim(`journal: ${result.journalPath}`));
+}
+
+/** Refuse (before any mutation) if remote moved past our base for any staged ticket. */
+export async function checkStaleness(ctx: PushContext, existingKeys: string[]): Promise<void> {
   const stale: string[] = [];
   for (const key of existingKeys) {
-    const base = store.readBase(key);
+    const base = ctx.store.readBase(key);
     if (!base) continue;
     try {
-      const res = (await client.get(`/rest/api/3/issue/${key}`, { fields: "updated" })) as any;
+      const res = (await ctx.client.get(`/rest/api/3/issue/${key}`, { fields: "updated" })) as any;
       if (res.fields?.updated && res.fields.updated !== base.updated) stale.push(key);
     } catch (e) {
-      if (e instanceof JiraApiError && e.status === 404) {
-        // deleting an already-deleted issue is handled at execution; updates will fail loudly
-        continue;
-      }
+      if (e instanceof JiraApiError && e.status === 404) continue; // delete of already-gone issue
       throw e;
     }
   }
@@ -52,7 +99,9 @@ export async function cmdPush(argv: string[]): Promise<void> {
         `review, re-commit if needed, then push again`,
     );
   }
+}
 
+export function printPlan(ops: CompiledOp[], warnings: string[]): void {
   console.log(bold(`push plan (${ops.length} operation${ops.length === 1 ? "" : "s"}):`));
   for (const w of warnings) console.log(`  ${yellow("warning:")} ${w}`);
   for (const op of ops) {
@@ -64,13 +113,19 @@ export async function cmdPush(argv: string[]): Promise<void> {
       console.log(dim(`    (transition to '${op.transitionTo}' — id resolved after creation)`));
     }
   }
+}
 
-  if (args["dry-run"]) {
-    console.log(`\n${cyan("dry-run")} — nothing sent`);
-    return;
-  }
+export interface PushResult {
+  journal: JournalEntry;
+  journalPath: string;
+  refMap: Map<string, string>;
+  failure: string | null;
+  okCount: number;
+}
 
-  // ---- execute ----
+/** Execute ops in order, settle all local layers against reality, journal, prune chain. */
+export async function executePush(ctx: PushContext, ops: CompiledOp[]): Promise<PushResult> {
+  const { store, client } = ctx;
   const journal: JournalEntry = {
     startedAt: new Date().toISOString(),
     result: "success",
@@ -78,8 +133,8 @@ export async function cmdPush(argv: string[]): Promise<void> {
     created: {},
   };
   const refMap = new Map<string, string>();
-  const opOutcomes = new Map<string, { ok: number; failed: number }>(); // per compiled issue id
-  const postedComments = new Map<string, string[]>(); // issue id -> md bodies posted
+  const opOutcomes = new Map<string, { ok: number; failed: number }>();
+  const postedComments = new Map<string, string[]>();
   let failure: string | null = null;
 
   const outcome = (issue: string) => {
@@ -88,7 +143,6 @@ export async function cmdPush(argv: string[]): Promise<void> {
     return o;
   };
 
-  console.log("");
   for (const op of ops) {
     const resolved = resolveRefs(op, refMap);
     const rec: JournalOpResult = {
@@ -267,25 +321,27 @@ export async function cmdPush(argv: string[]): Promise<void> {
     if (fresh) integrateFetched(store, fresh);
   }
 
+  // Tickets that drained out of the changeset leave the commit chain.
+  const committedNow = new Set(store.listCommittedIds());
+  const committedDeletions = new Set(
+    store.readDeletions().filter((d) => d.committed).map((d) => d.key),
+  );
+  const drained = [...new Set([...opOutcomes.keys(), ...refMap.keys()])].filter(
+    (id) => !committedNow.has(id) && !committedDeletions.has(id),
+  );
+  pruneChain(store, drained);
+
   const journalPath = store.appendJournal(journal);
-  console.log("");
-  if (failure) {
-    console.log(red(`push incomplete — ${journal.ops.filter((o) => o.ok).length}/${ops.length} ops applied`));
-    console.log(dim(`journal: ${journalPath}`));
-    console.log(dim("local state was re-synced to what actually applied; fix and push again"));
-    Deno.exit(1);
-  }
-  const createdNote = refMap.size
-    ? ` · created: ${[...refMap.entries()].map(([r, k]) => `${r} → ${bold(k)}`).join(", ")}`
-    : "";
-  console.log(green(`pushed ${ops.length} operation${ops.length === 1 ? "" : "s"}`) + createdNote);
-  console.log(dim(`journal: ${journalPath}`));
+  return {
+    journal,
+    journalPath,
+    refMap,
+    failure,
+    okCount: journal.ops.filter((o) => o.ok).length,
+  };
 }
 
-async function tryFetch(
-  ctx: ReturnType<typeof localContext> & { meta: Meta; client: JiraClient },
-  key: string,
-): Promise<BaseEntry | null> {
+async function tryFetch(ctx: PushContext, key: string): Promise<BaseEntry | null> {
   try {
     return await fetchBaseEntry(ctx.client, ctx.meta, ctx.ws.config, key);
   } catch {
@@ -348,7 +404,10 @@ function walkKeys(node: unknown, refMap: Map<string, string>, label: string): vo
 }
 
 /** Rewrite @refs in parent/links to real keys; returns whether anything changed. */
-function rewriteRefs(t: { parent: string | null; links: { to: string }[] }, refMap: Map<string, string>): boolean {
+function rewriteRefs(
+  t: { parent: string | null; links: { to: string }[] },
+  refMap: Map<string, string>,
+): boolean {
   let changed = false;
   if (t.parent && refMap.has(t.parent)) {
     t.parent = refMap.get(t.parent)!;
@@ -363,7 +422,11 @@ function rewriteRefs(t: { parent: string | null; links: { to: string }[] }, refM
   return changed;
 }
 
-async function findTransition(client: any, transitionPath: string, target: string): Promise<string> {
+async function findTransition(
+  client: JiraClient,
+  transitionPath: string,
+  target: string,
+): Promise<string> {
   const res = (await client.get(transitionPath)) as any;
   const match = (res.transitions ?? []).find(
     (t: any) => t.to?.name && t.to.name.toLowerCase() === target.toLowerCase(),
@@ -378,3 +441,5 @@ async function findTransition(client: any, transitionPath: string, target: strin
 function indent(text: string, pad: string): string {
   return text.split("\n").map((l) => pad + l).join("\n");
 }
+
+export type { CompiledPush };

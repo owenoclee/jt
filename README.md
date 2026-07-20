@@ -24,6 +24,12 @@ liberties live.
   permission system (e.g. Claude Code's) can allowlist the whole workflow and gate
   exactly the one command that touches Jira — with the full op list printed in its
   output.
+- **A browser review gate.** `jt push --await-user` serves the changeset as a
+  PR-style page on localhost — full diff vs Jira, per-round commit deltas ("what did
+  the agent change since I last looked"), per-ticket approve/reject with notes — and
+  the same process that rendered the page executes exactly the approved subset.
+  Rejection notes flow back to the agent through stdout; approved tickets leave the
+  changeset, so each review round only shows what's still in question.
 
 ## Install
 
@@ -45,9 +51,10 @@ jt meta sync                        # alias maps: fields, issue types, sprints, 
 
 jt fetch ENG-123                    # materializes tickets/ENG-123.json
 $EDITOR tickets/ENG-123.json        # edit desired state (or let your agent do it)
-jt diff                             # review the change
-jt commit                           # approve it
-jt push                             # send exactly that — prints every API op first
+jt diff                             # review the change (or: jt diff --web)
+jt commit -m "first round"          # stage it
+jt push --await-user                # approve per ticket in the browser, then it sends
+# or: jt push                       # non-interactive; prints every API op first
 ```
 
 Create an epic with a child story in one push:

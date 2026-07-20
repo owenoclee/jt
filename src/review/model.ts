@@ -1,0 +1,102 @@
+/** Builds the review-page model from the tool-owned layers (no network). */
+import {
+  type ChainSnapshot,
+  readChain,
+  readReviewMarker,
+  snapshotEqual,
+  stateAtSeq,
+} from "../chain.ts";
+import type { Store } from "../store.ts";
+import type { Config, Ticket } from "../types.ts";
+import { renderTicketDelta, type ReviewPageModel, type TicketSection } from "./html.ts";
+import type { TicketPlan } from "./plan.ts";
+
+export function buildPageModel(
+  store: Store,
+  config: Config,
+  plans: TicketPlan[],
+  timeoutMs: number,
+): ReviewPageModel {
+  const tickets = plans.map((p) => {
+    const base = p.id.startsWith("@") ? null : store.readBase(p.id);
+    const committed = store.readCommitted(p.id);
+    const from = base?.ticket ?? null;
+    const to = p.kind === "delete" ? null : committed?.ticket ?? null;
+    return {
+      id: p.id,
+      summary: p.summary,
+      kind: p.kind,
+      dependsOn: p.dependsOn,
+      diffHtml: renderTicketDelta(from, to),
+      opsJson: JSON.stringify(
+        p.ops.map((o) => ({ method: o.method, path: o.path, body: o.body })),
+        null,
+        2,
+      ),
+    };
+  });
+
+  return {
+    mode: "review",
+    title: `jt push review — ${tickets.length} ticket${tickets.length === 1 ? "" : "s"}`,
+    target: { baseUrl: config.baseUrl, project: config.project },
+    tickets,
+    commits: buildCommitViews(store),
+    sinceReview: buildSinceReview(store, plans.map((p) => p.id)),
+    nonce: crypto.randomUUID(),
+    timeoutMs,
+  };
+}
+
+function snapshotTicket(s: ChainSnapshot | null): Ticket | null {
+  return s && s.kind === "ticket" ? s.ticket : null;
+}
+
+export function buildCommitViews(store: Store): ReviewPageModel["commits"] {
+  const chain = readChain(store);
+  return chain.entries.map((entry) => {
+    const sections: TicketSection[] = Object.entries(entry.tickets).map(([id, snap]) => {
+      const prior = stateAtSeq(chain, id, entry.seq - 1);
+      const base = id.startsWith("@") ? null : store.readBase(id);
+      const from = snapshotTicket(prior) ?? base?.ticket ?? null;
+      const to = snap.kind === "deletion" ? null : snap.ticket;
+      const fromForDelete = from ??
+        (snap.kind === "deletion" ? ({ summary: snap.summary } as unknown as Ticket) : null);
+      return {
+        id,
+        title: `${id}  ${snap.kind === "deletion" ? `(deletion) ${snap.summary}` : snap.ticket.summary}`,
+        html: renderTicketDelta(snap.kind === "deletion" ? fromForDelete : from, to),
+      };
+    });
+    return {
+      seq: entry.seq,
+      author: entry.author,
+      note: entry.note,
+      createdAt: entry.createdAt,
+      sections,
+    };
+  });
+}
+
+export function buildSinceReview(
+  store: Store,
+  ids: string[],
+): ReviewPageModel["sinceReview"] {
+  const chain = readChain(store);
+  const marker = readReviewMarker(store);
+  const tipSeq = chain.entries.at(-1)?.seq ?? 0;
+  if (!marker || marker.lastReviewedSeq >= tipSeq) return null;
+
+  const sections: TicketSection[] = [];
+  for (const id of ids) {
+    const priorSnap = stateAtSeq(chain, id, marker.lastReviewedSeq);
+    const currentSnap = stateAtSeq(chain, id, tipSeq);
+    if (snapshotEqual(priorSnap, currentSnap)) continue;
+    const base = id.startsWith("@") ? null : store.readBase(id);
+    const from = snapshotTicket(priorSnap) ?? (priorSnap === null ? base?.ticket ?? null : null);
+    const to = currentSnap === null || currentSnap.kind === "deletion" ? null : currentSnap.ticket;
+    const summary = to?.summary ?? from?.summary ?? "";
+    sections.push({ id, title: `${id}  ${summary}`, html: renderTicketDelta(from, to) });
+  }
+  return sections.length > 0 ? { fromSeq: marker.lastReviewedSeq, sections } : null;
+}

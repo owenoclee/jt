@@ -3,7 +3,9 @@
  * Validates aliases against meta and the markdown subset up front, so bad state is
  * rejected at commit time instead of failing mid-push.
  */
+import { parseArgs } from "@std/cli";
 import { ticketsEqual } from "../canonical.ts";
+import { appendChainEntry, type ChainSnapshot } from "../chain.ts";
 import { localContext, withMeta } from "../context.ts";
 import { diffComments } from "../diff.ts";
 import { fail, UserError } from "../errors.ts";
@@ -21,9 +23,13 @@ import type { Store } from "../store.ts";
 import type { Meta, Ticket } from "../types.ts";
 
 export function cmdCommit(argv: string[]): void {
+  const args = parseArgs(argv, { string: ["m", "message"], alias: { m: "message" } });
+  const note = (args.message as string | undefined) ?? "";
   const ctx = withMeta(localContext());
   const { store, meta } = ctx;
-  const filter = argv.map((a) => (a.startsWith("@") ? a : a.toUpperCase()));
+  const filter = (args._ as (string | number)[]).map(String).map((a) =>
+    a.startsWith("@") ? a : a.toUpperCase()
+  );
   const statuses = store.status();
   const committable = statuses.filter((s) =>
     ["modified", "new", "committed+modified", "new+committed+modified", "deleted"].includes(s.state)
@@ -47,6 +53,7 @@ export function cmdCommit(argv: string[]): void {
   }
 
   const committed: string[] = [];
+  const snapshots: Record<string, ChainSnapshot> = {};
   for (const s of targets) {
     if (s.state === "deleted") {
       const deletions = store.readDeletions();
@@ -55,6 +62,7 @@ export function cmdCommit(argv: string[]): void {
         d.committed = true;
         store.writeDeletions(deletions);
         committed.push(`${s.id} (deletion)`);
+        snapshots[s.id] = { kind: "deletion", summary: d.summary };
       }
       continue;
     }
@@ -63,8 +71,10 @@ export function cmdCommit(argv: string[]): void {
     validateForCommit(store, meta, s.id, working.ticket);
     store.writeCommitted(s.id, working.bytes);
     committed.push(s.id);
+    snapshots[s.id] = { kind: "ticket", ticket: working.ticket };
   }
 
+  appendChainEntry(store, "agent", note || `commit ${committed.join(", ")}`, snapshots);
   console.log(`${green("committed:")} ${committed.map(bold).join(", ")}`);
   console.log(dim("review what push will send: jt diff --committed · then: jt push"));
 }

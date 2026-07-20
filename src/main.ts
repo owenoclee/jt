@@ -32,17 +32,22 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
     jt status               working vs committed vs base, per ticket
     jt diff [ID...]         uncommitted changes (working vs committed/base)
     jt diff --committed     what push will send (committed vs base)
+    jt diff --web           open the diff as a PR-style page in the browser
     jt show ID [--base|--committed]
     jt log [--all]          push journal
 
   write (local-safe)
     jt new NAME [--type T] [--summary S] [--parent KEY|@name]
-    jt commit [ID...]       snapshot approved working state for push
+    jt commit [ID...] [-m 'note']   snapshot approved working state for push
     jt rm KEY               stage remote deletion   ·   jt untrack ID  drop locally
     jt resolve KEY          accept working file as desired state after a pull conflict
 
   push (the only remote-mutating verb)
     jt push [--dry-run]     compile committed−base → print exact API ops → execute → journal
+    jt push --await-user [--timeout SECS]
+                            serve the changeset as a browser review page; the user
+                            approves/rejects per ticket (with notes); only approved
+                            tickets are sent. exit 0 all pushed · 2 rejections · 1 timeout
 
   agent docs: jt schema   (ticket file JSON Schema) · see SKILL.md
 `;

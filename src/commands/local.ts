@@ -1,7 +1,10 @@
 /** Local-only verbs: status, diff, show, new, rm, untrack, resolve, log, schema. */
 import { parseArgs } from "@std/cli";
-import { basename } from "@std/path";
+import { basename, join } from "@std/path";
 import { ticketsEqual } from "../canonical.ts";
+import { pruneChain } from "../chain.ts";
+import { renderPage, renderTicketDelta, type ReviewPageModel } from "../review/html.ts";
+import { buildCommitViews, buildSinceReview } from "../review/model.ts";
 import { localContext, withClient, withMeta } from "../context.ts";
 import { diffTickets } from "../diff.ts";
 import { fail } from "../errors.ts";
@@ -17,10 +20,15 @@ export function cmdStatus(): void {
 }
 
 export function cmdDiff(argv: string[]): void {
-  const args = parseArgs(argv, { boolean: ["committed", "all"] });
-  const { store } = localContext();
+  const args = parseArgs(argv, { boolean: ["committed", "all", "web"] });
+  const ctx = localContext();
+  const { store } = ctx;
   const filter = (args._ as string[]).map(String);
   const wanted = (id: string) => filter.length === 0 || filter.includes(id);
+  if (args.web) {
+    diffWeb(ctx, Boolean(args.committed), Boolean(args.all), wanted);
+    return;
+  }
   const sections: string[] = [];
 
   if (args.committed) {
@@ -84,6 +92,77 @@ export function cmdDiff(argv: string[]): void {
     return;
   }
   console.log(sections.join("\n\n"));
+}
+
+/** jt diff --web: render the current diff as a read-only PR-style page and open it. */
+function diffWeb(
+  ctx: ReturnType<typeof localContext>,
+  committedView: boolean,
+  all: boolean,
+  wanted: (id: string) => boolean,
+): void {
+  const { store } = ctx;
+  const tickets: ReviewPageModel["tickets"] = [];
+  const push = (
+    id: string,
+    summary: string,
+    kind: "create" | "update" | "delete",
+    from: Ticket | null,
+    to: Ticket | null,
+  ) => {
+    const diffHtml = renderTicketDelta(from, to);
+    if (diffHtml) tickets.push({ id, summary, kind, dependsOn: [], diffHtml, opsJson: "" });
+  };
+
+  if (committedView) {
+    for (const id of store.listCommittedIds()) {
+      if (!wanted(id)) continue;
+      const committed = store.readCommitted(id)!;
+      const base = id.startsWith("@") ? null : store.readBase(id);
+      push(id, committed.ticket.summary, base ? "update" : "create", base?.ticket ?? null, committed.ticket);
+    }
+    for (const d of store.readDeletions().filter((d) => d.committed)) {
+      if (!wanted(d.key)) continue;
+      push(d.key, d.summary, "delete", store.readBase(d.key)?.ticket ?? null, null);
+    }
+  } else {
+    for (const s of store.status()) {
+      if (!wanted(s.id)) continue;
+      const working = store.readWorking(s.id);
+      const base = s.id.startsWith("@") ? null : store.readBase(s.id);
+      if (s.state === "new") push(s.id, s.summary, "create", null, working!.ticket);
+      else if (s.state === "deleted" || s.state === "deleted+committed") {
+        push(s.id, s.summary, "delete", base?.ticket ?? null, null);
+      } else if (working && base) {
+        const against = all ? base.ticket : store.readCommitted(s.id)?.ticket ?? base.ticket;
+        push(s.id, working.ticket.summary, "update", against, working.ticket);
+      } else if (working && !base && all) {
+        push(s.id, s.summary, "create", null, working.ticket);
+      }
+    }
+  }
+
+  const model: ReviewPageModel = {
+    mode: "readonly",
+    title: committedView ? "jt diff --committed (what push will send)" : "jt diff (uncommitted changes)",
+    target: { baseUrl: ctx.ws.config.baseUrl, project: ctx.ws.config.project },
+    tickets,
+    commits: buildCommitViews(store),
+    sinceReview: buildSinceReview(store, tickets.map((t) => t.id)),
+    nonce: "",
+    timeoutMs: 0,
+  };
+  const dir = join(store.jiraDir, "tmp");
+  Deno.mkdirSync(dir, { recursive: true });
+  const path = join(dir, `diff-${Date.now()}.html`);
+  Deno.writeTextFileSync(path, renderPage(model));
+  console.log(`diff page: ${path}`);
+  try {
+    const cmd = Deno.build.os === "darwin" ? "open" : "xdg-open";
+    new Deno.Command(cmd, { args: [path], stdout: "null", stderr: "null" }).spawn().unref();
+  } catch {
+    // path was printed
+  }
 }
 
 export function cmdShow(argv: string[]): void {
@@ -183,6 +262,7 @@ export function cmdUntrack(argv: string[]): void {
       store.writeDeletions(store.readDeletions().filter((d) => d.key !== id));
       store.writeConflicts(store.readConflicts().filter((c) => c.key !== id));
     }
+    pruneChain(store, [id]);
     console.log(`untracked ${id} ${dim("(local only — Jira is untouched)")}`);
   }
 }
@@ -199,6 +279,7 @@ export async function cmdResolve(argv: string[]): Promise<void> {
   const fresh = await fetchBaseEntry(ctx.client, ctx.meta, ctx.ws.config, key);
   ctx.store.writeBase(fresh);
   ctx.store.removeCommitted(key);
+  pruneChain(ctx.store, [key]);
   ctx.store.writeConflicts(ctx.store.readConflicts().filter((c) => c.key !== key));
   if (ticketsEqual(working.ticket, fresh.ticket)) {
     ctx.store.writeWorking(key, fresh.ticket);

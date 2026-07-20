@@ -25,6 +25,14 @@ approved and pushed · `2` some/all rejected (notes on stdout — read them, edi
 a new round, push again) · `1` timeout or push failure. Run it in the background if
 your tool-call timeout is shorter than the review timeout (default 600s; `--timeout`).
 
+**Opening the page is YOUR job (the agent's).** jt prints `review page: <url>` and
+waits — it does not launch a browser (sandboxed shells can't). Extract that URL from
+the output and hand it to the OS opener for the user, e.g. `open "<url>"` on macOS
+(this may need to run outside the sandbox). Launching the user's browser at the URL
+is expected and required; what is forbidden is YOU loading it — never fetch(), curl,
+or drive browser-automation tools at the review URL. jt itself accepts `--open` for
+humans running it directly in a normal terminal.
+
 Iterate in rounds: rejected tickets stay committed; approved ones push immediately and
 leave the changeset, so the next review page only contains what's still in question.
 `jt commit -m` messages become the round history on the page — write them for the
@@ -101,8 +109,9 @@ parents before children, then renames the files to their real keys.
 
 - `jt show PROJ-123` renders the working copy; `--base` shows remote-as-fetched;
   `--committed` shows what's staged for push.
-- `jt diff --web` opens the current diff as a read-only browser page (same renderer
-  as the review page) — useful mid-refinement before anything is committed.
+- `jt diff --web` writes the current diff as a read-only browser page (same renderer
+  as the review page) and prints its file path — open that path for the user (or pass
+  `--open`). Useful mid-refinement before anything is committed.
 - `jt log` renders the push journal — every API call ever sent, with responses.
 
 ## Suggested permission setup

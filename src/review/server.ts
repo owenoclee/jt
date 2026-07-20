@@ -15,6 +15,11 @@ import { buildTicketPlans, filterOpsForApproved } from "./plan.ts";
 
 export interface ReviewOptions {
   timeoutMs: number;
+  /**
+   * Launch the OS browser opener from this process (--open). Default false: printing
+   * the URL is the contract — sandboxed agent shells can't open GUI apps, so the
+   * agent (or user) opens the printed URL instead. See SKILL.md.
+   */
   openBrowser?: boolean;
   port?: number;
   /** Test hook: called with the review URL once the server is listening. */
@@ -158,9 +163,9 @@ async function serveAndAwait(
   const addr = server.addr as Deno.NetAddr;
   const reviewUrl = `http://127.0.0.1:${addr.port}/review/${model.nonce}`;
   console.log(`${bold("review page:")} ${reviewUrl}`);
-  console.log(dim("waiting for your decision in the browser..."));
+  console.log(dim("open this URL in a browser to decide — waiting..."));
   opts.onServe?.(reviewUrl);
-  if (opts.openBrowser !== false) openInBrowser(reviewUrl);
+  if (opts.openBrowser) openInBrowser(reviewUrl);
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<null>((r) => {

@@ -44,10 +44,12 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
 
   push (the only remote-mutating verb)
     jt push [--dry-run]     compile committed−base → print exact API ops → execute → journal
-    jt push --await-user [--timeout SECS]
+    jt push --await-user [--timeout SECS] [--open]
                             serve the changeset as a browser review page; the user
                             approves/rejects per ticket (with notes); only approved
-                            tickets are sent. exit 0 all pushed · 2 rejections · 1 timeout
+                            tickets are sent. Prints the URL (agent/user opens it;
+                            --open to launch the browser from jt itself).
+                            exit 0 all pushed · 2 rejections · 1 timeout
 
   agent docs: jt schema   (ticket file JSON Schema) · see SKILL.md
 `;

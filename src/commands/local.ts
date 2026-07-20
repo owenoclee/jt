@@ -20,13 +20,13 @@ export function cmdStatus(): void {
 }
 
 export function cmdDiff(argv: string[]): void {
-  const args = parseArgs(argv, { boolean: ["committed", "all", "web"] });
+  const args = parseArgs(argv, { boolean: ["committed", "all", "web", "open"] });
   const ctx = localContext();
   const { store } = ctx;
   const filter = (args._ as string[]).map(String);
   const wanted = (id: string) => filter.length === 0 || filter.includes(id);
   if (args.web) {
-    diffWeb(ctx, Boolean(args.committed), Boolean(args.all), wanted);
+    diffWeb(ctx, Boolean(args.committed), Boolean(args.all), wanted, Boolean(args.open));
     return;
   }
   const sections: string[] = [];
@@ -100,6 +100,7 @@ function diffWeb(
   committedView: boolean,
   all: boolean,
   wanted: (id: string) => boolean,
+  openIt: boolean,
 ): void {
   const { store } = ctx;
   const tickets: ReviewPageModel["tickets"] = [];
@@ -157,11 +158,13 @@ function diffWeb(
   const path = join(dir, `diff-${Date.now()}.html`);
   Deno.writeTextFileSync(path, renderPage(model));
   console.log(`diff page: ${path}`);
-  try {
-    const cmd = Deno.build.os === "darwin" ? "open" : "xdg-open";
-    new Deno.Command(cmd, { args: [path], stdout: "null", stderr: "null" }).spawn().unref();
-  } catch {
-    // path was printed
+  if (openIt) {
+    try {
+      const cmd = Deno.build.os === "darwin" ? "open" : "xdg-open";
+      new Deno.Command(cmd, { args: [path], stdout: "null", stderr: "null" }).spawn().unref();
+    } catch {
+      // path was printed
+    }
   }
 }
 

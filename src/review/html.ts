@@ -41,8 +41,9 @@ export interface ReviewPageModel {
   tickets: {
     id: string;
     summary: string;
-    kind: "create" | "update" | "delete";
-    dependsOn: string[];
+    kind: "create" | "update" | "delete" | "view";
+    /** Byte-identical to what the user saw at their last review — collapsed by default. */
+    unchangedSinceReview: boolean;
     diffHtml: string;
     opsJson: string;
   }[];
@@ -175,27 +176,26 @@ function fmt(v: unknown): string {
 export function renderPage(model: ReviewPageModel): string {
   const isReview = model.mode === "review";
   const ticketCards = model.tickets.map((t) => {
-    const deps = t.dependsOn.length
-      ? `<span class="deps" data-deps="${escapeHtml(t.dependsOn.join(","))}">needs ${
-        escapeHtml(t.dependsOn.join(", "))
-      }</span>`
+    const collapsed = t.unchangedSinceReview;
+    const unchangedBadge = collapsed
+      ? `<span class="unchanged">unchanged since your last review ✓</span>
+         <button class="expand" type="button">expand</button>`
       : "";
-    const decision = isReview
-      ? `<div class="decision" data-ticket="${escapeHtml(t.id)}">
-          <label class="approve-lbl"><input type="radio" name="d-${escapeHtml(t.id)}" value="approve" checked> approve</label>
-          <label class="reject-lbl"><input type="radio" name="d-${escapeHtml(t.id)}" value="reject"> reject</label>
-          <input type="text" class="note" placeholder="note for the agent (optional, sent on reject)">
+    const note = isReview
+      ? `<div class="notebar" data-ticket="${escapeHtml(t.id)}">
+          <input type="text" class="note" placeholder="feedback on ${
+        escapeHtml(t.id)
+      } (returned to the agent when you request changes)">
         </div>`
       : "";
-    return `<section class="ticket" id="t-${escapeHtml(t.id)}" data-id="${escapeHtml(t.id)}" data-deps="${
-      escapeHtml(t.dependsOn.join(","))
-    }">
+    return `<section class="ticket${collapsed ? " collapsed" : ""}" id="t-${
+      escapeHtml(t.id)
+    }" data-id="${escapeHtml(t.id)}">
       <header>
         <span class="badge badge-${t.kind}">${t.kind}</span>
         <h3>${escapeHtml(t.id)} <span class="summary">${escapeHtml(t.summary)}</span></h3>
-        ${deps}
+        ${unchangedBadge}
       </header>
-      ${decision}
       <div class="body">${t.diffHtml}</div>
       ${
       t.opsJson
@@ -204,6 +204,7 @@ export function renderPage(model: ReviewPageModel): string {
         }</pre></details>`
         : ""
     }
+      ${note}
     </section>`;
   }).join("\n");
 
@@ -245,9 +246,9 @@ export function renderPage(model: ReviewPageModel): string {
 
   const footer = isReview
     ? `<footer class="sendbar">
-        <span id="count"></span>
         <span id="countdown"></span>
-        <button id="send">Send decisions</button>
+        <button id="request" type="button">Request changes</button>
+        <button id="approve" type="button">Approve &amp; push all ${model.tickets.length}</button>
       </footer>`
     : "";
 
@@ -256,60 +257,40 @@ export function renderPage(model: ReviewPageModel): string {
     const nonce = ${JSON.stringify(model.nonce)};
     const deadline = Date.now() + ${model.timeoutMs};
     const tickets = [...document.querySelectorAll('section.ticket[data-id]')];
-    function decisions() {
+    function notes() {
       const out = {};
       for (const t of tickets) {
-        const id = t.dataset.id;
-        const approve = t.querySelector('input[value="approve"]').checked;
-        const note = t.querySelector('.note').value;
-        out[id] = { approve, note };
+        const v = t.querySelector('.note')?.value?.trim();
+        if (v) out[t.dataset.id] = v;
       }
       return out;
     }
-    function refresh() {
-      const d = decisions();
-      // dependency enforcement: reject cascades to dependents
-      let changed = true;
-      while (changed) {
-        changed = false;
-        for (const t of tickets) {
-          const deps = (t.dataset.deps || '').split(',').filter(Boolean);
-          const id = t.dataset.id;
-          if (d[id].approve && deps.some((x) => d[x] && !d[x].approve)) {
-            d[id].approve = false;
-            t.querySelector('input[value="reject"]').checked = true;
-            t.classList.add('dep-blocked');
-            changed = true;
-          }
-        }
-      }
-      for (const t of tickets) {
-        t.classList.toggle('rejected', !d[t.dataset.id].approve);
-        if (d[t.dataset.id].approve) t.classList.remove('dep-blocked');
-      }
-      const n = Object.values(d).filter((x) => x.approve).length;
-      document.getElementById('count').textContent = n + '/' + tickets.length + ' approved';
-    }
-    document.addEventListener('change', refresh);
-    refresh();
     setInterval(() => {
       const left = Math.max(0, deadline - Date.now());
       const m = Math.floor(left / 60000), s = Math.floor((left % 60000) / 1000);
       document.getElementById('countdown').textContent =
         left > 0 ? 'times out in ' + m + 'm ' + String(s).padStart(2, '0') + 's' : 'timed out';
     }, 500);
-    document.getElementById('send').addEventListener('click', async () => {
-      refresh();
+    async function send(decision) {
       const res = await fetch('/decide/' + nonce, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ decisions: decisions() }),
+        body: JSON.stringify({ decision, notes: notes() }),
       });
       document.body.innerHTML = res.ok
-        ? '<div class="done">Decisions sent — jt is pushing the approved tickets. You can close this tab and return to your session.</div>'
+        ? (decision === 'approve'
+          ? '<div class="done">Approved — jt is pushing the whole changeset. You can close this tab and return to your session.</div>'
+          : '<div class="done">Changes requested — nothing was sent; your notes are on their way to the agent. You can close this tab.</div>')
         : '<div class="done">Something went wrong (' + res.status + '). Check the terminal.</div>';
-    });`
+    }
+    document.getElementById('approve').addEventListener('click', () => send('approve'));
+    document.getElementById('request').addEventListener('click', () => send('request-changes'));`
     : "";
+  const expandJs = `
+    document.querySelectorAll('.expand').forEach((b) => b.addEventListener('click', () => {
+      b.closest('section.ticket').classList.remove('collapsed');
+      b.remove();
+    }));`;
 
   return `<!doctype html>
 <html lang="en">
@@ -342,6 +323,7 @@ document.querySelectorAll('.tab').forEach((b) => b.addEventListener('click', () 
   b.classList.add('active');
   document.getElementById(b.dataset.tab).hidden = false;
 }));
+${expandJs}
 ${reviewJs}
 </script>
 </body>
@@ -388,7 +370,13 @@ section.ticket h3 { margin: 0; font-size: 14px; }
 .badge-create { background: var(--add-bg); color: var(--add-fg); }
 .badge-update { background: var(--card); color: var(--accent); border: 1px solid var(--border); }
 .badge-delete { background: var(--del-bg); color: var(--del-fg); }
-.deps { font-size: 11px; color: var(--warn); }
+.badge-view { background: var(--card); color: var(--muted); border: 1px solid var(--border); }
+.unchanged { font-size: 12px; color: var(--add-fg); margin-left: auto; }
+.expand { background: none; border: 1px solid var(--border); color: var(--muted); border-radius: 6px; padding: 2px 8px; font: inherit; font-size: 11px; cursor: pointer; }
+section.ticket.collapsed .body,
+section.ticket.collapsed details.ops,
+section.ticket.collapsed .notebar { display: none; }
+section.ticket.collapsed > header { border-bottom: none; }
 .body { padding: 12px 14px; }
 .frow { display: flex; gap: 10px; align-items: baseline; padding: 3px 0; flex-wrap: wrap; }
 .fname { color: var(--muted); min-width: 90px; font-size: 12px; }
@@ -418,15 +406,12 @@ section.ticket h3 { margin: 0; font-size: 14px; }
 details.ops { border-top: 1px solid var(--border); padding: 8px 14px; }
 details.ops summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 details.ops pre { font-size: 11px; overflow-x: auto; }
-.decision { display: flex; gap: 14px; align-items: center; padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--bg); }
-.approve-lbl { color: var(--add-fg); }
-.reject-lbl { color: var(--del-fg); }
-.decision .note { flex: 1; background: var(--card); border: 1px solid var(--border); color: var(--fg); border-radius: 6px; padding: 4px 8px; font: inherit; font-size: 12px; }
-section.ticket.rejected .body, section.ticket.rejected details.ops { opacity: 0.45; }
-section.ticket.dep-blocked > header { outline: 1px solid var(--warn); }
-.sendbar { position: fixed; bottom: 0; left: 0; right: 0; display: flex; gap: 16px; align-items: center; justify-content: flex-end; padding: 12px 20px; background: var(--card); border-top: 1px solid var(--border); }
-#count, #countdown { color: var(--muted); font-size: 13px; }
-#send { background: var(--add-fg); color: #fff; border: none; border-radius: 6px; padding: 8px 18px; font: inherit; font-weight: 600; cursor: pointer; }
-#send:hover { filter: brightness(1.1); }
+.notebar { padding: 8px 14px; border-top: 1px solid var(--border); }
+.notebar .note { width: 100%; background: var(--card); border: 1px solid var(--border); color: var(--fg); border-radius: 6px; padding: 5px 10px; font: inherit; font-size: 12px; }
+.sendbar { position: fixed; bottom: 0; left: 0; right: 0; display: flex; gap: 12px; align-items: center; justify-content: flex-end; padding: 12px 20px; background: var(--card); border-top: 1px solid var(--border); }
+#countdown { color: var(--muted); font-size: 13px; margin-right: auto; }
+#approve { background: var(--add-fg); color: #fff; border: none; border-radius: 6px; padding: 8px 18px; font: inherit; font-weight: 600; cursor: pointer; }
+#request { background: none; color: var(--del-fg); border: 1px solid var(--del-fg); border-radius: 6px; padding: 8px 18px; font: inherit; font-weight: 600; cursor: pointer; }
+#approve:hover, #request:hover { filter: brightness(1.1); }
 .done { display: flex; align-items: center; justify-content: center; height: 80vh; font-size: 16px; color: var(--muted); padding: 20px; text-align: center; }
 `;

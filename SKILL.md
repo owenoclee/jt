@@ -19,11 +19,20 @@ jt push --await-user       # THE ONLY REMOTE-MUTATING COMMAND — opens a browse
 
 **Prefer `jt push --await-user` whenever a human is in the loop.** It renders the
 changeset as a PR-style page (full diff, per-round commit deltas, "since your last
-review"), served by the same process that executes the push — the user's browser click
-is the approval, with no model-mediated transcription anywhere. Exit codes: `0` all
-approved and pushed · `2` some/all rejected (notes on stdout — read them, edit, commit
-a new round, push again) · `1` timeout or push failure. Run it in the background if
-your tool-call timeout is shorter than the review timeout (default 600s; `--timeout`).
+review", tickets unchanged since the last review auto-collapsed), served by the same
+process that executes the push. The gate is **atomic**: the user either approves the
+WHOLE changeset (everything ships, exactly as rendered) or requests changes (NOTHING
+ships; their per-ticket notes come back on stdout). Exit codes: `0` approved & pushed ·
+`2` changes requested (read the notes, act, push again) · `1` timeout/stale/failure.
+Run it in the background if your tool-call timeout is shorter than the review timeout
+(default 600s; `--timeout`).
+
+Acting on notes: if a note asks for edits, edit the working file, `jt commit -m` a new
+round, push again. If a note says to ship without a particular ticket, run
+`jt uncommit <ID>` (keeps the working edits, removes it from the changeset — the
+`git restore --staged` analog) and push again; the next page shows the smaller
+changeset. `jt restore <ID>` is the `git checkout --` analog: discards working edits
+(resets to committed if staged, else base) and also undoes `jt rm`.
 
 **Opening the page is YOUR job (the agent's).** jt prints `review page: <url>` and
 waits — it does not launch a browser (sandboxed shells can't). Extract that URL from
@@ -33,8 +42,6 @@ is expected and required; what is forbidden is YOU loading it — never fetch(),
 or drive browser-automation tools at the review URL. jt itself accepts `--open` for
 humans running it directly in a normal terminal.
 
-Iterate in rounds: rejected tickets stay committed; approved ones push immediately and
-leave the changeset, so the next review page only contains what's still in question.
 `jt commit -m` messages become the round history on the page — write them for the
 reviewer. Plain `jt push` (no browser gate) still exists for non-interactive use.
 
@@ -109,6 +116,9 @@ parents before children, then renames the files to their real keys.
 
 - `jt show PROJ-123` renders the working copy; `--base` shows remote-as-fetched;
   `--committed` shows what's staged for push.
+- `jt show --web [KEY...]` writes a read-only workspace-browser page (fully rendered
+  ticket cards; no args = all tracked tickets) and prints its path — open it for the
+  user (or pass `--open`). Use it to show the user what a fetch brought down.
 - `jt diff --web` writes the current diff as a read-only browser page (same renderer
   as the review page) and prints its file path — open that path for the user (or pass
   `--open`). Useful mid-refinement before anything is committed.

@@ -46,10 +46,12 @@ export async function cmdPush(argv: string[]): Promise<void> {
       timeoutMs,
       openBrowser: Boolean(args.open),
     });
-    // Exit codes for the agent loop: 0 = everything approved and pushed,
-    // 2 = user rejected some/all (notes on stdout), 1 = timeout or push failure.
-    if (outcome.status === "timeout" || outcome.pushFailure) Deno.exit(1);
-    if (outcome.status !== "pushed") Deno.exit(2);
+    // Exit codes for the agent loop: 0 = approved and pushed whole,
+    // 2 = changes requested (notes on stdout), 1 = timeout/stale/push failure.
+    if (outcome.status === "timeout" || outcome.status === "stale" || outcome.pushFailure) {
+      Deno.exit(1);
+    }
+    if (outcome.status === "changes-requested") Deno.exit(2);
     return;
   }
 

@@ -1,8 +1,9 @@
 /**
  * The --await-user review flow: serve the changeset as a PR-style page on loopback,
- * wait for per-ticket decisions from the human, then execute exactly the approved
- * subset. The reviewing process and the sending process are the same process — there
- * is no approve-then-push-later window.
+ * wait for the human's single decision — Approve & push (the WHOLE changeset) or
+ * Request changes (nothing sent; per-ticket notes return to the agent) — then act.
+ * The reviewing process and the sending process are the same process, and an approved
+ * page is sent whole: what you saw is exactly what ships, as a unit.
  */
 import { readChain, writeReviewMarker } from "../chain.ts";
 import { checkStaleness, executePush, type PushContext } from "../commands/push.ts";
@@ -11,7 +12,7 @@ import { UserError } from "../errors.ts";
 import { bold, cyan, dim, green, red, yellow } from "../render/colors.ts";
 import { renderPage, type ReviewPageModel } from "./html.ts";
 import { buildPageModel } from "./model.ts";
-import { buildTicketPlans, filterOpsForApproved } from "./plan.ts";
+import { buildTicketPlans } from "./plan.ts";
 
 export interface ReviewOptions {
   timeoutMs: number;
@@ -26,14 +27,14 @@ export interface ReviewOptions {
   onServe?: (url: string) => void;
 }
 
-export type Decisions = Record<string, { approve: boolean; note: string }>;
+export interface Decision {
+  decision: "approve" | "request-changes";
+  notes: Record<string, string>;
+}
 
 export interface ReviewOutcome {
-  status: "pushed" | "partial" | "all-rejected" | "timeout";
-  approved: string[];
-  rejected: { id: string; note: string }[];
-  droppedForDeps: { id: string; reason: string }[];
-  droppedStale: string[];
+  status: "pushed" | "changes-requested" | "timeout" | "stale";
+  notes: Record<string, string>;
   pushFailure: string | null;
 }
 
@@ -47,93 +48,67 @@ export async function runReviewFlow(
   const model = buildPageModel(store, ctx.ws.config, plans, opts.timeoutMs);
 
   for (const w of compiled.warnings) console.log(`${yellow("warning:")} ${w}`);
-  const decisions = await serveAndAwait(model, opts);
+  const decision = await serveAndAwait(model, opts);
 
-  if (decisions === null) {
+  if (decision === null) {
     console.log(red("review timed out — nothing was sent"));
-    return {
-      status: "timeout",
-      approved: [],
-      rejected: [],
-      droppedForDeps: [],
-      droppedStale: [],
-      pushFailure: null,
-    };
+    return { status: "timeout", notes: {}, pushFailure: null };
   }
 
   const tipSeq = readChain(store).entries.at(-1)?.seq;
   if (tipSeq !== undefined) writeReviewMarker(store, tipSeq);
 
-  const approvedIds = plans.filter((p) => decisions[p.id]?.approve).map((p) => p.id);
-  const rejected = plans
-    .filter((p) => !decisions[p.id]?.approve)
-    .map((p) => ({ id: p.id, note: decisions[p.id]?.note ?? "" }));
+  const printNotes = (label: string) => {
+    for (const [id, note] of Object.entries(decision.notes)) {
+      console.log(`${label} ${id} — ${JSON.stringify(note)}`);
+    }
+  };
 
-  const filtered = filterOpsForApproved(plans, compiled.ops, approvedIds);
+  if (decision.decision === "request-changes") {
+    console.log(red("changes requested — nothing was sent"));
+    printNotes(red("note:"));
+    if (Object.keys(decision.notes).length === 0) {
+      console.log(dim("(no notes were left — ask the user what to change)"));
+    }
+    return { status: "changes-requested", notes: decision.notes, pushFailure: null };
+  }
 
-  // The user may have taken minutes — re-check staleness for what's about to ship.
-  const staleDropped: string[] = [];
-  const approvedExisting = filtered.approved.filter((id) => !id.startsWith("@"));
+  // Approved. The user may have taken minutes — re-check staleness before sending.
+  // Atomic gate: any staleness aborts the whole push (nothing partial).
   try {
-    await checkStaleness(ctx, approvedExisting);
+    await checkStaleness(ctx, compiled.existingKeys);
   } catch (e) {
     if (!(e instanceof UserError)) throw e;
-    staleDropped.push(...approvedExisting.filter((id) => e.message.includes(id)));
+    console.log(red(`not sent — ${e.message}`));
+    return { status: "stale", notes: decision.notes, pushFailure: null };
   }
-  const finalApproved = filtered.approved.filter((id) => !staleDropped.includes(id));
-  const finalOps = filtered.ops.filter((op) => finalApproved.includes(op.issue));
 
-  let pushFailure: string | null = null;
-  if (finalOps.length > 0) {
-    console.log("");
-    const result = await executePush(ctx, finalOps);
-    pushFailure = result.failure;
-    console.log("");
-    const createdNote = result.refMap.size
-      ? ` · created: ${[...result.refMap.entries()].map(([r, k]) => `${r} → ${bold(k)}`).join(", ")}`
-      : "";
-    if (pushFailure) {
-      console.log(red(`push incomplete — ${result.okCount}/${finalOps.length} ops applied`));
-    } else {
-      console.log(green(`pushed: ${finalApproved.join(", ")}`) + createdNote);
-    }
-    console.log(dim(`journal: ${result.journalPath}`));
+  console.log("");
+  const result = await executePush(ctx, compiled.ops);
+  console.log("");
+  const createdNote = result.refMap.size
+    ? ` · created: ${[...result.refMap.entries()].map(([r, k]) => `${r} → ${bold(k)}`).join(", ")}`
+    : "";
+  if (result.failure) {
+    console.log(red(`push incomplete — ${result.okCount}/${compiled.ops.length} ops applied`));
   } else {
-    console.log(cyan("nothing approved — nothing was sent"));
+    console.log(
+      green(`approved and pushed ${compiled.ops.length} operation${compiled.ops.length === 1 ? "" : "s"}`) +
+        createdNote,
+    );
   }
-
-  for (const r of rejected) {
-    console.log(`${red("rejected:")} ${r.id}${r.note ? ` — ${JSON.stringify(r.note)}` : ""}`);
-  }
-  for (const d of filtered.dropped) {
-    console.log(`${yellow("not sent:")} ${d.id} — ${d.reason} (approve them together)`);
-  }
-  for (const s of staleDropped) {
-    console.log(`${yellow("not sent:")} ${s} — remote changed while you reviewed; run jt pull`);
-  }
-
-  const status = rejected.length === 0 && filtered.dropped.length === 0 && staleDropped.length === 0
-    ? "pushed"
-    : finalApproved.length > 0
-    ? "partial"
-    : "all-rejected";
-  return {
-    status,
-    approved: finalApproved,
-    rejected,
-    droppedForDeps: filtered.dropped,
-    droppedStale: staleDropped,
-    pushFailure,
-  };
+  console.log(dim(`journal: ${result.journalPath}`));
+  printNotes(cyan("note (fyi, left on an approved review):"));
+  return { status: "pushed", notes: decision.notes, pushFailure: result.failure };
 }
 
 /** Serve the page on loopback and wait for one decision POST (or timeout). */
 async function serveAndAwait(
   model: ReviewPageModel,
   opts: ReviewOptions,
-): Promise<Decisions | null> {
-  let resolveDecision!: (d: Decisions) => void;
-  const decided = new Promise<Decisions>((r) => (resolveDecision = r));
+): Promise<Decision | null> {
+  let resolveDecision!: (d: Decision) => void;
+  const decided = new Promise<Decision>((r) => (resolveDecision = r));
   let done = false;
 
   const html = renderPage(model);
@@ -147,10 +122,12 @@ async function serveAndAwait(
       if (req.method === "POST" && url.pathname === `/decide/${model.nonce}` && !done) {
         try {
           const body = await req.json();
-          const decisions = body?.decisions;
-          if (!decisions || typeof decisions !== "object") throw new Error("bad payload");
+          if (body?.decision !== "approve" && body?.decision !== "request-changes") {
+            throw new Error("bad payload");
+          }
+          const notes = body.notes && typeof body.notes === "object" ? body.notes : {};
           done = true;
-          resolveDecision(decisions as Decisions);
+          resolveDecision({ decision: body.decision, notes });
           return Response.json({ ok: true });
         } catch {
           return Response.json({ ok: false }, { status: 400 });

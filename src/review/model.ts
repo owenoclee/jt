@@ -17,16 +17,26 @@ export function buildPageModel(
   plans: TicketPlan[],
   timeoutMs: number,
 ): ReviewPageModel {
+  const chain = readChain(store);
+  const marker = readReviewMarker(store);
   const tickets = plans.map((p) => {
     const base = p.id.startsWith("@") ? null : store.readBase(p.id);
     const committed = store.readCommitted(p.id);
     const from = base?.ticket ?? null;
     const to = p.kind === "delete" ? null : committed?.ticket ?? null;
+    // Collapse only on byte-identical proof: the snapshot the user last reviewed
+    // equals the current tip snapshot for this ticket.
+    const unchangedSinceReview = marker !== null &&
+      stateAtSeq(chain, p.id, marker.lastReviewedSeq) !== null &&
+      snapshotEqual(
+        stateAtSeq(chain, p.id, marker.lastReviewedSeq),
+        stateAtSeq(chain, p.id, chain.entries.at(-1)?.seq ?? 0),
+      );
     return {
       id: p.id,
       summary: p.summary,
       kind: p.kind,
-      dependsOn: p.dependsOn,
+      unchangedSinceReview,
       diffHtml: renderTicketDelta(from, to),
       opsJson: JSON.stringify(
         p.ops.map((o) => ({ method: o.method, path: o.path, body: o.body })),

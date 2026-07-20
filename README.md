@@ -26,10 +26,12 @@ liberties live.
   output.
 - **A browser review gate.** `jt push --await-user` serves the changeset as a
   PR-style page on localhost — full diff vs Jira, per-round commit deltas ("what did
-  the agent change since I last looked"), per-ticket approve/reject with notes — and
-  the same process that rendered the page executes exactly the approved subset.
-  Rejection notes flow back to the agent through stdout; approved tickets leave the
-  changeset, so each review round only shows what's still in question.
+  the agent change since I last looked"), tickets unchanged since your last review
+  auto-collapsed — and the same process that rendered the page executes the push. The
+  gate is atomic, like a PR merge: **Approve & push** sends the whole changeset
+  exactly as rendered; **Request changes** sends nothing and returns your per-ticket
+  notes to the agent. Reshaping the batch happens in the layers (`jt uncommit`, the
+  `git restore --staged` analog), never inside the send button.
 
 ## Install
 

@@ -3,7 +3,7 @@ import { parseArgs } from "@std/cli";
 import { basename, join } from "@std/path";
 import { ticketsEqual } from "../canonical.ts";
 import { pruneChain } from "../chain.ts";
-import { renderPage, renderTicketDelta, type ReviewPageModel } from "../review/html.ts";
+import { renderPage, renderTicketCard, renderTicketDelta, type ReviewPageModel } from "../review/html.ts";
 import { buildCommitViews, buildSinceReview } from "../review/model.ts";
 import { localContext, withClient, withMeta } from "../context.ts";
 import { diffTickets } from "../diff.ts";
@@ -112,7 +112,9 @@ function diffWeb(
     to: Ticket | null,
   ) => {
     const diffHtml = renderTicketDelta(from, to);
-    if (diffHtml) tickets.push({ id, summary, kind, dependsOn: [], diffHtml, opsJson: "" });
+    if (diffHtml) {
+      tickets.push({ id, summary, kind, unchangedSinceReview: false, diffHtml, opsJson: "" });
+    }
   };
 
   if (committedView) {
@@ -169,10 +171,17 @@ function diffWeb(
 }
 
 export function cmdShow(argv: string[]): void {
-  const args = parseArgs(argv, { boolean: ["base", "committed"] });
-  const target = (args._ as string[]).map(String)[0];
-  if (!target) fail("usage: jt show <KEY | @name | path> [--base|--committed]");
-  const { store } = localContext();
+  const args = parseArgs(argv, { boolean: ["base", "committed", "web", "open"] });
+  const targets = (args._ as string[]).map(String);
+  const ctx = localContext();
+  const { store } = ctx;
+
+  if (args.web) {
+    showWeb(ctx, targets, Boolean(args.base), Boolean(args.committed), Boolean(args.open));
+    return;
+  }
+  const target = targets[0];
+  if (!target) fail("usage: jt show <KEY | @name | path> [--base|--committed] | jt show --web [KEY...]");
 
   if (target.endsWith(".json")) {
     const wf = store.readWorkingFile(target);
@@ -194,6 +203,66 @@ export function cmdShow(argv: string[]): void {
   }
   if (!ticket) fail(`no ${args.base ? "base" : args.committed ? "committed" : "working"} copy of ${id}`);
   console.log(renderTicket(ticket, label));
+}
+
+/** jt show --web: read-only workspace browser — fully rendered ticket cards. */
+function showWeb(
+  ctx: ReturnType<typeof localContext>,
+  targets: string[],
+  base: boolean,
+  committed: boolean,
+  openIt: boolean,
+): void {
+  const { store } = ctx;
+  const layer = base ? "base" : committed ? "committed" : "working";
+  const statuses = store.status();
+  const ids = targets.length
+    ? targets.map((t) => (t.startsWith("@") ? t : t.toUpperCase()))
+    : statuses.map((s) => s.id);
+
+  const tickets: ReviewPageModel["tickets"] = [];
+  for (const id of ids) {
+    const ticket = base
+      ? store.readBase(id)?.ticket
+      : committed
+      ? store.readCommitted(id)?.ticket
+      : store.readWorking(id)?.ticket;
+    if (!ticket) continue;
+    const state = statuses.find((s) => s.id === id)?.state ?? "clean";
+    tickets.push({
+      id,
+      summary: `${ticket.summary}  (${state})`,
+      kind: "view",
+      unchangedSinceReview: false,
+      diffHtml: renderTicketCard(ticket, "view"),
+      opsJson: "",
+    });
+  }
+  if (tickets.length === 0) fail(`nothing to show in the ${layer} layer`);
+
+  const model: ReviewPageModel = {
+    mode: "readonly",
+    title: `jt workspace — ${tickets.length} ticket${tickets.length === 1 ? "" : "s"} (${layer})`,
+    target: { baseUrl: ctx.ws.config.baseUrl, project: ctx.ws.config.project },
+    tickets,
+    commits: buildCommitViews(store),
+    sinceReview: null,
+    nonce: "",
+    timeoutMs: 0,
+  };
+  const dir = join(store.jiraDir, "tmp");
+  Deno.mkdirSync(dir, { recursive: true });
+  const path = join(dir, `show-${Date.now()}.html`);
+  Deno.writeTextFileSync(path, renderPage(model));
+  console.log(`workspace page: ${path}`);
+  if (openIt) {
+    try {
+      const cmd = Deno.build.os === "darwin" ? "open" : "xdg-open";
+      new Deno.Command(cmd, { args: [path], stdout: "null", stderr: "null" }).spawn().unref();
+    } catch {
+      // path was printed
+    }
+  }
 }
 
 export function cmdNew(argv: string[]): void {
@@ -226,6 +295,61 @@ export function cmdNew(argv: string[]): void {
   const path = ctx.store.workingPath(`@${name}`);
   console.log(`created ${path} ${dim(`(referenced as @${name} until pushed)`)}`);
   console.log(dim("edit the file, then: jt diff && jt commit && jt push"));
+}
+
+/** jt uncommit: `git restore --staged` — keep working edits, remove from the changeset. */
+export function cmdUncommit(argv: string[]): void {
+  if (argv.length === 0) fail("usage: jt uncommit <KEY|@name...>  (keeps your edits; removes from what push will send)");
+  const { store } = localContext();
+  for (const raw of argv) {
+    const id = raw.startsWith("@") ? raw : raw.toUpperCase();
+    const deletions = store.readDeletions();
+    const deletion = deletions.find((d) => d.key === id && d.committed);
+    if (deletion) {
+      deletion.committed = false;
+      store.writeDeletions(deletions);
+      pruneChain(store, [id]);
+      console.log(`uncommitted ${bold(id)} ${dim("(deletion intent kept, no longer staged for push)")}`);
+      continue;
+    }
+    if (!store.readCommitted(id)) {
+      console.log(`${id}: nothing committed`);
+      continue;
+    }
+    store.removeCommitted(id);
+    pruneChain(store, [id]);
+    console.log(`uncommitted ${bold(id)} ${dim("(working edits kept — see jt status)")}`);
+  }
+}
+
+/** jt restore: `git checkout -- <file>` — reset working file to committed-if-staged else base. */
+export function cmdRestore(argv: string[]): void {
+  if (argv.length === 0) {
+    fail("usage: jt restore <KEY|@name...>  (discards working edits: resets to committed if staged, else to base; undoes jt rm)");
+  }
+  const { store } = localContext();
+  for (const raw of argv) {
+    const id = raw.startsWith("@") ? raw : raw.toUpperCase();
+    const deletions = store.readDeletions();
+    const deletion = deletions.find((d) => d.key === id);
+    if (deletion) {
+      const base = store.readBase(id);
+      if (!base) fail(`${id}: deletion staged but no base snapshot — jt untrack instead`);
+      store.writeDeletions(deletions.filter((d) => d.key !== id));
+      pruneChain(store, [id]);
+      store.writeWorking(id, base.ticket);
+      console.log(`restored ${bold(id)} ${dim("(deletion undone; working file back from base)")}`);
+      continue;
+    }
+    const committed = store.readCommitted(id);
+    const base = id.startsWith("@") ? null : store.readBase(id);
+    const source = committed?.ticket ?? base?.ticket;
+    if (!source) fail(`${id}: nothing to restore from (no committed or base copy)`);
+    store.writeWorking(id, source);
+    console.log(
+      `restored ${bold(id)} from ${committed ? "committed" : "base"} ${dim("(working edits discarded)")}`,
+    );
+  }
 }
 
 export function cmdRm(argv: string[]): void {

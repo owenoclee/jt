@@ -8,10 +8,12 @@ import {
   cmdLog,
   cmdNew,
   cmdResolve,
+  cmdRestore,
   cmdRm,
   cmdSchema,
   cmdShow,
   cmdStatus,
+  cmdUncommit,
   cmdUntrack,
 } from "./commands/local.ts";
 import { UserError } from "./errors.ts";
@@ -32,24 +34,27 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
     jt status               working vs committed vs base, per ticket
     jt diff [ID...]         uncommitted changes (working vs committed/base)
     jt diff --committed     what push will send (committed vs base)
-    jt diff --web           open the diff as a PR-style page in the browser
+    jt diff --web           render the diff as a PR-style page (prints path; --open)
     jt show ID [--base|--committed]
+    jt show --web [ID...]   read-only workspace browser: rendered ticket cards
     jt log [--all]          push journal
 
   write (local-safe)
     jt new NAME [--type T] [--summary S] [--parent KEY|@name]
-    jt commit [ID...] [-m 'note']   snapshot approved working state for push
+    jt commit [ID...] [-m 'note']   stage working state into the changeset
+    jt uncommit ID...       unstage (keep working edits)     [git restore --staged]
+    jt restore ID...        reset working file to committed/base; undoes jt rm
     jt rm KEY               stage remote deletion   ·   jt untrack ID  drop locally
     jt resolve KEY          accept working file as desired state after a pull conflict
 
   push (the only remote-mutating verb)
     jt push [--dry-run]     compile committed−base → print exact API ops → execute → journal
     jt push --await-user [--timeout SECS] [--open]
-                            serve the changeset as a browser review page; the user
-                            approves/rejects per ticket (with notes); only approved
-                            tickets are sent. Prints the URL (agent/user opens it;
-                            --open to launch the browser from jt itself).
-                            exit 0 all pushed · 2 rejections · 1 timeout
+                            serve the changeset as a browser review page. ONE decision:
+                            Approve & push (whole changeset) or Request changes (nothing
+                            sent; per-ticket notes returned). Prints the URL — agent or
+                            user opens it (--open to launch from jt itself).
+                            exit 0 pushed · 2 changes requested · 1 timeout/stale
 
   agent docs: jt schema   (ticket file JSON Schema) · see SKILL.md
 `;
@@ -78,6 +83,10 @@ async function main(): Promise<void> {
       return cmdNew(rest);
     case "commit":
       return cmdCommit(rest);
+    case "uncommit":
+      return cmdUncommit(rest);
+    case "restore":
+      return cmdRestore(rest);
     case "rm":
       return cmdRm(rest);
     case "untrack":

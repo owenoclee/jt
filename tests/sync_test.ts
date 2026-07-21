@@ -1,8 +1,26 @@
 import { assert, assertEquals } from "@std/assert";
 import { serializeTicket, ticketsEqual } from "../src/canonical.ts";
 import { diffTickets } from "../src/diff.ts";
-import { integrateFetched } from "../src/sync.ts";
-import { makeBaseEntry, makeTicket, tempStore } from "./helpers.ts";
+import { integrateFetched, issueToBaseEntry } from "../src/sync.ts";
+import { makeBaseEntry, makeConfig, makeMeta, makeTicket, tempStore } from "./helpers.ts";
+
+Deno.test("fetch canonicalizes component arrays to name lists", () => {
+  const issue = {
+    key: "TST-9",
+    fields: {
+      summary: "s",
+      updated: "2026-01-02T00:00:00.000Z",
+      issuetype: { name: "Task" },
+      project: { key: "TST" },
+      components: [
+        { id: "10000", name: "api" },
+        { id: "10001", name: "billing" },
+      ],
+    },
+  };
+  const entry = issueToBaseEntry(issue, makeMeta(), makeConfig({ customFields: ["Components"] }));
+  assertEquals(entry.ticket.fields, { Components: ["api", "billing"] });
+});
 
 Deno.test("integrate: first fetch materializes working file", () => {
   const store = tempStore();

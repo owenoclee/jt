@@ -373,6 +373,10 @@ function compileCustomValue(fm: MetaField, value: unknown, alias: string): unkno
     if (!Array.isArray(value)) fail(`field '${alias}': expected an array of option strings`);
     return value.map((v) => ({ value: v }));
   }
+  if (fm.schemaType === "array" && fm.schemaItems === "component") {
+    if (!Array.isArray(value)) fail(`field '${alias}': expected an array of component names`);
+    return value.map((v) => ({ name: v }));
+  }
   if (fm.schemaType === "number") {
     if (typeof value !== "number") fail(`field '${alias}': expected a number`);
     return value;

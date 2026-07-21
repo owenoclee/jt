@@ -86,6 +86,33 @@ Deno.test("field updates compile: sprint, labels, custom fields, assignee, paren
   assertEquals(fields.summary, undefined); // unchanged fields are not sent
 });
 
+Deno.test("component-array fields compile to {name} objects", async () => {
+  const store = tempStore();
+  const base = makeTicket({ key: "TST-20", fields: { Components: ["api"] } });
+  store.writeBase(makeBaseEntry(base));
+  store.writeCommitted(
+    "TST-20",
+    serializeTicket({ ...base, fields: { Components: ["api", "webhooks"] } }),
+  );
+
+  const { ops } = await compilePush(ctx(store));
+  assertEquals(ops.length, 1);
+  // deno-lint-ignore no-explicit-any
+  const fields = (ops[0].body as any).fields;
+  assertEquals(fields.components, [{ name: "api" }, { name: "webhooks" }]);
+});
+
+Deno.test("component-array fields reject non-array values", async () => {
+  const store = tempStore();
+  const base = makeTicket({ key: "TST-21", fields: { Components: ["api"] } });
+  store.writeBase(makeBaseEntry(base));
+  store.writeCommitted(
+    "TST-21",
+    serializeTicket({ ...base, fields: { Components: "api" } }),
+  );
+  await assertRejects(() => compilePush(ctx(store)), UserError, "array of component names");
+});
+
 Deno.test("status change compiles to a transition with resolved id", async () => {
   const store = tempStore();
   const base = makeTicket({ key: "TST-3", status: "To Do" });

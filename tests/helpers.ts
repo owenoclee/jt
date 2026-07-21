@@ -44,6 +44,7 @@ export function makeMeta(overrides: Partial<Meta> = {}): Meta {
       { id: "customfield_10016", name: "Story Points", custom: true, schemaType: "number" },
       { id: "customfield_10020", name: "Sprint", custom: true, schemaType: "array", schemaCustom: "com.pyxis.greenhopper.jira:gh-sprint" },
       { id: "customfield_10050", name: "Team", custom: true, schemaType: "option" },
+      { id: "components", name: "Components", custom: false, schemaType: "array", schemaItems: "component" },
       { id: "summary", name: "Summary", custom: false, schemaType: "string" },
     ],
     issueTypes: [

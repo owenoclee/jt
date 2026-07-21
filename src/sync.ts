@@ -151,6 +151,9 @@ function canonicalizeCustomValue(
   if (fm.schemaType === "array" && fm.schemaItems === "option") {
     return (value as any[]).map((v) => v.value);
   }
+  if (fm.schemaType === "array" && fm.schemaItems === "component") {
+    return (value as any[]).map((v) => v.name);
+  }
   if (fm.schemaType === "user") {
     return value.emailAddress || `accountId:${value.accountId}`;
   }

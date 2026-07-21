@@ -1,0 +1,17 @@
+# Jira workspace data
+.jira/
+tickets/
+
+# Local secrets and environment
+.env
+.env.*
+!.env.example
+
+# Build and test output
+dist/
+coverage/
+
+# OS and editor files
+.DS_Store
+*.swp
+*.swo

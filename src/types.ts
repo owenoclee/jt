@@ -73,8 +73,6 @@ export interface Config {
   email: string;
   project: string;
   boardId?: number;
-  /** Built-in fields included in ticket files. */
-  trackedFields: string[];
   /** Custom field aliases tracked in the `fields` object. */
   customFields: string[];
   /** Mirror declaration: `jt pull` keeps the workspace equal to this JQL slice of Jira. */

@@ -41,7 +41,6 @@ export const ConfigSchema = z.strictObject({
   email: z.string().email(),
   project: z.string().min(1),
   boardId: z.number().int().optional(),
-  trackedFields: z.array(z.string()),
   customFields: z.array(z.string()),
   sync: z.strictObject({ jql: z.string().min(1) }).optional(),
 });

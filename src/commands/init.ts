@@ -1,6 +1,6 @@
 import { parseArgs } from "@std/cli";
 import { join } from "@std/path";
-import { CREDENTIALS_PATH, DEFAULT_TRACKED_FIELDS, loadToken, loadWorkspace } from "../config.ts";
+import { CREDENTIALS_PATH, loadToken, loadWorkspace } from "../config.ts";
 import { fail } from "../errors.ts";
 import { Store } from "../store.ts";
 
@@ -37,7 +37,6 @@ export function cmdInit(argv: string[]): void {
     email: email!,
     project: project!.toUpperCase(),
     ...(args.board ? { boardId: Number(args.board) } : {}),
-    trackedFields: DEFAULT_TRACKED_FIELDS,
     customFields: [],
     sync: { jql: `project = ${project!.toUpperCase()}` },
   };

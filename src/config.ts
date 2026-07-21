@@ -3,17 +3,6 @@ import { ConfigSchema } from "./schema.ts";
 import { fail } from "./errors.ts";
 import type { Config } from "./types.ts";
 
-export const DEFAULT_TRACKED_FIELDS = [
-  "summary",
-  "description",
-  "status",
-  "labels",
-  "parent",
-  "sprint",
-  "assignee",
-  "priority",
-];
-
 export interface Workspace {
   root: string;
   jiraDir: string;

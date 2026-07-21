@@ -75,7 +75,6 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
     baseUrl: "https://example.atlassian.net",
     email: "test@example.com",
     project: "TST",
-    trackedFields: ["summary", "description", "status", "labels", "parent", "sprint", "assignee", "priority"],
     customFields: ["Story Points"],
     ...overrides,
   };

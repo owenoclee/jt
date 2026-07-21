@@ -163,6 +163,14 @@ Deno.test("e2e: full lifecycle against mock Jira", async (t) => {
       mock.issues.get("TST-1")!.summary = "changed in web UI";
       mock.touch("TST-1");
       await assertRejects(() => cmdPush([]), UserError, "remote changed");
+      // the guard batched: one key-in search, not a GET per staged issue
+      assert(mock.requestLog.some((r) =>
+        r.path === "/rest/api/3/search/jql" && /key in/i.test(r.body?.jql ?? "")
+      ));
+      // strict JQL validation rejecting key-in degrades to per-key GETs, same verdict
+      mock.rejectKeyInSearch = true;
+      await assertRejects(() => cmdPush([]), UserError, "remote changed");
+      mock.rejectKeyInSearch = false;
       // pull → conflict (both edited summary)
       await cmdPull();
       const conflicts = store.readConflicts();

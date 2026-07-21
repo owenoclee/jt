@@ -10,12 +10,14 @@
  */
 // deno-lint-ignore-file no-explicit-any
 import { parseArgs } from "@std/cli";
+import { chunks } from "../batch.ts";
 import { serializeTicket, ticketsEqual } from "../canonical.ts";
 import { pruneChain } from "../chain.ts";
 import { compilePush, type CompiledPush } from "../compile.ts";
 import { localContext, withClient, withMeta } from "../context.ts";
 import { fail } from "../errors.ts";
 import { JiraApiError, type JiraClient } from "../jira/client.ts";
+import { searchPage } from "../jira/search.ts";
 import { bold, cyan, dim, green, red, yellow } from "../render/colors.ts";
 import { fetchBaseEntry, integrateFetched } from "../sync.ts";
 import type {
@@ -83,16 +85,15 @@ export async function cmdPush(argv: string[]): Promise<void> {
 
 /** Refuse (before any mutation) if remote moved past our base for any staged ticket. */
 export async function checkStaleness(ctx: PushContext, existingKeys: string[]): Promise<void> {
+  const tracked = existingKeys
+    .map((key) => ({ key, base: ctx.store.readBase(key) }))
+    .filter((e): e is { key: string; base: BaseEntry } => e.base !== null);
   const stale: string[] = [];
-  for (const key of existingKeys) {
-    const base = ctx.store.readBase(key);
-    if (!base) continue;
-    try {
-      const res = (await ctx.client.get(`/rest/api/3/issue/${key}`, { fields: "updated" })) as any;
-      if (res.fields?.updated && res.fields.updated !== base.updated) stale.push(key);
-    } catch (e) {
-      if (e instanceof JiraApiError && e.status === 404) continue; // delete of already-gone issue
-      throw e;
+  for (const chunk of chunks(tracked, 200)) {
+    const remote = await remoteUpdated(ctx, chunk.map((e) => e.key));
+    for (const { key, base } of chunk) {
+      const upd = remote.get(key); // absent = gone remotely (delete of already-gone issue)
+      if (upd && upd !== base.updated) stale.push(key);
     }
   }
   if (stale.length) {
@@ -101,6 +102,42 @@ export async function checkStaleness(ctx: PushContext, existingKeys: string[]): 
         `review, re-commit if needed, then push again`,
     );
   }
+}
+
+/**
+ * `updated` per key in one search round-trip instead of a GET per issue — large
+ * changesets were stalling here before the review URL could print. Jira rejects the
+ * whole `key in (...)` query if any key no longer exists, so a 400 falls back to
+ * per-key GETs (bounded concurrency), where a 404 means the same thing: gone.
+ */
+async function remoteUpdated(ctx: PushContext, keys: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  try {
+    let token: string | undefined;
+    do {
+      const page = await searchPage(ctx.client, `key in (${keys.join(", ")})`, ["updated"], token);
+      for (const issue of page.issues ?? []) {
+        out.set(issue.key, issue.fields?.updated ?? "");
+      }
+      token = page.nextPageToken;
+    } while (token);
+    return out;
+  } catch (e) {
+    if (!(e instanceof JiraApiError) || e.status !== 400) throw e;
+    out.clear();
+  }
+  for (const group of chunks(keys, 8)) {
+    await Promise.all(group.map(async (key) => {
+      try {
+        const res = (await ctx.client.get(`/rest/api/3/issue/${key}`, { fields: "updated" })) as any;
+        if (res.fields?.updated) out.set(key, res.fields.updated);
+      } catch (e) {
+        if (e instanceof JiraApiError && e.status === 404) return;
+        throw e;
+      }
+    }));
+  }
+  return out;
 }
 
 export function printPlan(ops: CompiledOp[], warnings: string[]): void {

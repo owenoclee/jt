@@ -8,6 +8,7 @@
  */
 // deno-lint-ignore-file no-explicit-any
 import { mdToAdf } from "./adf/md_to_adf.ts";
+import { chunks } from "./batch.ts";
 import { fieldEqual } from "./canonical.ts";
 import { diffComments, diffTickets } from "./diff.ts";
 import { fail } from "./errors.ts";
@@ -27,6 +28,8 @@ export interface CompileContext {
   store: Store;
   meta: Meta;
   client: JiraClient;
+  /** Per-compile memo for assignee email -> accountId lookups. */
+  accountIds?: Map<string, string>;
 }
 
 export interface CompiledPush {
@@ -38,6 +41,7 @@ export interface CompiledPush {
 
 export async function compilePush(ctx: CompileContext): Promise<CompiledPush> {
   const { store, meta } = ctx;
+  ctx.accountIds ??= new Map();
 
   const conflicts = store.readConflicts();
   if (conflicts.length > 0) {
@@ -107,6 +111,27 @@ export async function compilePush(ctx: CompileContext): Promise<CompiledPush> {
   }
 
   // ---- updates ----
+  // Transition targets need a per-issue GET (available transitions depend on the
+  // issue's current status). Resolve them concurrently up front — sequential GETs
+  // here stalled compile (and the review URL) on large changesets.
+  const transitionIds = new Map<string, string>();
+  {
+    const targets: [string, string][] = [];
+    for (const key of updateKeys) {
+      const committed = store.readCommitted(key);
+      const base = store.readBase(key);
+      if (!committed?.ticket.status || !base) continue;
+      if (!fieldEqual(base.ticket, committed.ticket, "status")) {
+        targets.push([key, checkStatusKnown(meta, committed.ticket.status)]);
+      }
+    }
+    for (const group of chunks(targets, 8)) {
+      await Promise.all(group.map(async ([key, target]) => {
+        transitionIds.set(key, await findTransitionId(ctx.client, key, target));
+      }));
+    }
+  }
+
   for (const key of updateKeys) {
     const committed = store.readCommitted(key);
     const base = store.readBase(key);
@@ -159,14 +184,13 @@ export async function compilePush(ctx: CompileContext): Promise<CompiledPush> {
     const statusChanged = !fieldEqual(base.ticket, committed.ticket, "status");
     if (statusChanged && committed.ticket.status) {
       const target = checkStatusKnown(meta, committed.ticket.status);
-      const transitionId = await findTransitionId(ctx.client, key, target);
       transitionOps.push({
         label: `transition ${key} to '${target}'`,
         kind: "transition",
         issue: key,
         method: "POST",
         path: `/rest/api/3/issue/${key}/transitions`,
-        body: { transition: { id: transitionId } },
+        body: { transition: { id: transitionIds.get(key)! } },
         transitionTo: target,
       });
     }
@@ -393,11 +417,16 @@ function pushLinkOp(
 
 async function resolveAccountId(ctx: CompileContext, assignee: string): Promise<string> {
   if (assignee.startsWith("accountId:")) return assignee.slice("accountId:".length);
+  const cached = ctx.accountIds?.get(assignee);
+  if (cached) return cached;
   const users = (await ctx.client.get("/rest/api/3/user/search", { query: assignee })) as any[];
   const exact = users.filter(
     (u) => u.emailAddress && u.emailAddress.toLowerCase() === assignee.toLowerCase(),
   );
-  if (exact.length === 1) return exact[0].accountId;
+  if (exact.length === 1) {
+    ctx.accountIds?.set(assignee, exact[0].accountId);
+    return exact[0].accountId;
+  }
   if (exact.length > 1) fail(`assignee '${assignee}' matches multiple users`);
   fail(
     `assignee '${assignee}' not found by email (the address may be private) — ` +

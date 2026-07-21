@@ -39,6 +39,8 @@ export class MockJira {
   requestLog: { method: string; path: string; body?: any }[] = [];
   /** When set, search results inline at most this many comments per issue (total stays honest). */
   searchCommentCap: number | null = null;
+  /** Simulate Jira's strict JQL validation rejecting `key in (...)` (e.g. a key no longer exists). */
+  rejectKeyInSearch = false;
   #issueCounter = 1;
   #idCounter = 1000;
   #clock = 0;
@@ -145,6 +147,14 @@ export class MockJira {
       let list = [...this.issues.values()];
       const proj = jql.match(/project\s*=\s*([A-Z][A-Z0-9_]*)/);
       if (proj) list = list.filter((i) => i.project === proj[1]);
+      const keyIn = jql.match(/key\s+in\s+\(([^)]*)\)/i);
+      if (keyIn) {
+        if (this.rejectKeyInSearch) {
+          return json({ errorMessages: ["An issue with key does not exist for field 'key'."] }, 400);
+        }
+        const wanted = new Set(keyIn[1].split(",").map((s) => s.trim()));
+        list = list.filter((i) => wanted.has(i.key));
+      }
       if (/order by updated desc/i.test(jql)) {
         list.sort((a, b) => b.updated.localeCompare(a.updated));
       } else {

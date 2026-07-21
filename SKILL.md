@@ -8,10 +8,40 @@ description: Manage Jira tickets with the jt CLI using local ticket files, compu
 `jt` treats Jira like a remote VCS. Edit ticket files, inspect computed diffs, commit
 the intended state, and let the user approve the whole push in a browser.
 
-## Workspace
+## Workspace discovery and setup
 
-A workspace contains `.jira/config.json` and `tickets/`. Commands find it by walking
-up from the current directory.
+A directory is a `jt` workspace if it contains:
+
+```text
+.jira/config.json
+```
+
+Starting at the current directory, check that directory and each ancestor for
+`.jira/config.json`. This is also how `jt` locates a workspace automatically. If found,
+use the nearest workspace.
+
+If no ancestor workspace exists, search the conventional durable location `~/jira/` for
+directories containing `.jira/config.json`. If a suitable workspace is found there, use
+it after confirming the project.
+
+If no workspace exists, propose creating `~/jira/<PROJECT_KEY>/` and ask for confirmation
+before creating that directory or initializing it.
+
+A `.jira/config.json` that is malformed or points to the wrong project is a setup problem:
+report it rather than silently creating a second workspace elsewhere.
+
+To initialize a new workspace, obtain any missing values:
+
+- Jira site or board URL. A pasted board URL is acceptable; derive the base URL, project
+  key, and board ID when possible.
+- Jira account email, if it is not already known.
+- Project key, if it cannot be derived from the URL.
+
+After initialization, run `jt meta sync` and `jt meta show`. Inspect the available issue
+types, statuses, priorities, sprints, and custom fields. Present the user with a concise
+selection of custom fields to track; configure only fields the user explicitly selects.
+Do not configure dozens of custom fields by default, it is likely the user only cares
+about a small subset of possible fields.
 
 The default workspace mirrors the project's `sync.jql`:
 
@@ -64,8 +94,11 @@ edits, run `jt restore ID`.
 - Do not edit tool-owned `.jira/` files. `.jira/config.json` is the sole exception for
   deliberate workspace configuration changes such as `sync.jql` or `customFields`.
 - Never ask for, read, write, or print the API token, credentials file, or
-  `$JIRA_API_TOKEN`. Direct the user to the README's Authentication section, then use
-  `jt config show` to verify the source.
+  `$JIRA_API_TOKEN`. Before initialization or remote operations, run `jt config show` to
+  verify whether authentication is configured. If authentication is missing, tell the
+  user to configure Jira credentials using the authentication mechanism supported by
+  their `jt` installation. Do not ask them to paste credentials into chat. Continue only
+  after `jt config show` reports a credential source.
 - Never interact with a review-page URL yourself.
 - Existing comments are append-only. Add a comment without an `id`; never edit or
   remove one with an `id`.

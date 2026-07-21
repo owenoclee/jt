@@ -98,7 +98,7 @@ jt changes --ack
 ```
 
 Pulling never advances the acknowledgment baseline. `jt changes --web` provides the
-same report with an Acknowledge button.
+same report using the user-facing web UI with an Acknowledge button.
 
 ## Creating tickets
 
@@ -119,7 +119,7 @@ with Jira keys and renames their files.
 fields, sprint assignment, status transitions, priority, assignee, and append-only
 comments. Descriptions and comments use a deterministic Markdown/ADF subset.
 
-It does not manage boards, sprints, Plans, goals, users, permissions, or workflows.
+It does not manage boards, sprints, plans, goals, users, permissions, or workflows.
 
 - `jt push` refuses if a staged ticket changed remotely after the last fetch.
 - `jt rm KEY` stages deletion; Jira is untouched until it is committed and approved.
@@ -132,8 +132,8 @@ Run `jt schema` for the strict ticket-file JSON Schema. Unknown keys are errors.
 ## Agents
 
 [SKILL.md](SKILL.md) is the agent contract. Install it in the agent's skills directory
-and allow local/read-only `jt` commands as appropriate. Keep `jt push` gated: it is the
-only command that mutates Jira.
+and allow local/read-only `jt` commands as appropriate. `jt push` is the only command
+that can mutate Jira and it always requires user confirmation through the browser UI.
 
 The user should create the credential directly; an agent should never ask for, read,
 or print the API token.

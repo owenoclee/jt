@@ -13,8 +13,9 @@
  */
 import { basename, join } from "@std/path";
 import { serializeTicket, ticketsEqual } from "./canonical.ts";
-import { parseTicket } from "./schema.ts";
 import { fail } from "./errors.ts";
+import { compareTicketIds } from "./keys.ts";
+import { parseTicket } from "./schema.ts";
 import type {
   BaseEntry,
   ConflictRecord,
@@ -80,7 +81,7 @@ export class Store {
       if (!e.isFile || !e.name.endsWith(".json")) continue;
       out.push(this.readWorkingFile(join(this.ticketsDir, e.name)));
     }
-    return out.sort((a, b) => a.id.localeCompare(b.id));
+    return out.sort((a, b) => compareTicketIds(a.id, b.id));
   }
 
   readWorkingFile(path: string): WorkingFile {
@@ -159,7 +160,7 @@ export class Store {
       return [...Deno.readDirSync(this.baseDir)]
         .filter((e) => e.isFile && e.name.endsWith(".json"))
         .map((e) => e.name.replace(/\.json$/, ""))
-        .sort();
+        .sort(compareTicketIds);
     } catch {
       return [];
     }
@@ -201,7 +202,7 @@ export class Store {
       return [...Deno.readDirSync(this.committedDir)]
         .filter((e) => e.isFile && e.name.endsWith(".json"))
         .map((e) => stemToId(e.name.replace(/\.json$/, "")))
-        .sort();
+        .sort(compareTicketIds);
     } catch {
       return [];
     }
@@ -242,7 +243,7 @@ export class Store {
       return [...Deno.readDirSync(this.seenDir)]
         .filter((e) => e.isFile && e.name.endsWith(".json"))
         .map((e) => e.name.replace(/\.json$/, ""))
-        .sort();
+        .sort(compareTicketIds);
     } catch {
       return [];
     }
@@ -369,7 +370,7 @@ export class Store {
     ]);
 
     const out: TicketStatus[] = [];
-    for (const id of [...ids].sort()) {
+    for (const id of [...ids].sort(compareTicketIds)) {
       const w = working.get(id) ?? null;
       const c = committedIds.has(id) ? this.readCommitted(id) : null;
       const base = id.startsWith("@") ? null : this.readBase(id);

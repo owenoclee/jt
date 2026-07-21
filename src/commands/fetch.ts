@@ -4,6 +4,7 @@ import { localContext, withClient, withMeta } from "../context.ts";
 import { fail } from "../errors.ts";
 import { JiraApiError, type JiraClient } from "../jira/client.ts";
 import { searchKeys, searchPage } from "../jira/search.ts";
+import { compareTicketIds } from "../keys.ts";
 import { dim, green, red, yellow } from "../render/colors.ts";
 import {
   commentsTruncated,
@@ -243,7 +244,7 @@ async function pullScope(
     const overlapped = maxUpdatedMs - WATERMARK_OVERLAP_MS;
     watermark = new Date(cutoff === null ? overlapped : Math.max(overlapped, cutoff)).toISOString();
   }
-  store.writeSyncState({ watermark, scopeKeys: [...scopeKeys].sort() });
+  store.writeSyncState({ watermark, scopeKeys: [...scopeKeys].sort(compareTicketIds) });
   return scopeKeys;
 }
 
@@ -356,4 +357,3 @@ function reportScope(
       break;
   }
 }
-

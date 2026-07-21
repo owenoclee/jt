@@ -21,7 +21,7 @@ import { UserError } from "./errors.ts";
 import { JiraApiError } from "./jira/client.ts";
 import { bold, red } from "./render/colors.ts";
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.2.1";
 
 const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit → diff → commit → push)
 

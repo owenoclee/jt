@@ -1,3 +1,8 @@
+---
+name: jt
+description: Manage Jira tickets with the jt CLI — Jira as a remote VCS with local ticket files, computed diffs, and a human-gated push. Use whenever the user wants to read, create, edit, link, label, transition, comment on, or delete Jira tickets/issues/epics, assign sprint work, or ask what changed on the board.
+---
+
 # jt — Jira tickets as local files (agent contract)
 
 `jt` treats Jira like a remote VCS. Tickets are JSON files in `tickets/`. You edit
@@ -104,6 +109,11 @@ change what push sends — it just shows up as a new uncommitted change afterwar
 
 - **Never** edit anything under `.jira/` (base/committed layers, meta, chain, journal — tool-owned).
 - Only `jt push` mutates Jira. Everything else is local or read-only, safe to allowlist.
+- **Never handle the API token.** Don't ask the user to paste it into the chat, and
+  never read, write, or print `~/.config/jira-cli/credentials` or `$JIRA_API_TOKEN`.
+  If auth is missing, point the user at the README's Authentication section — they
+  run its setup one-liner in their own terminal. Verify afterwards with
+  `jt config show`, which names the token's source without printing it.
 - **Never open, read, or interact with the review page URL** (`http://127.0.0.1:…`)
   with browser tools. The page exists so the HUMAN can approve out-of-band; an agent
   clicking it defeats the entire mechanism. Localhost must not be in any browser-tool

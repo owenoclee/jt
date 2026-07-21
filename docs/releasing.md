@@ -6,8 +6,8 @@ constant in `src/main.ts` exactly (for example, tag `v0.3.0` for `VERSION = "0.3
 The release workflow:
 
 1. Runs the test suite.
-2. Compiles Linux, macOS, and Windows executables.
-3. Publishes `.tar.gz` archives for Unix, a `.zip` for Windows, and `SHA256SUMS`.
+2. Compiles Linux and macOS executables for x86-64 and ARM64.
+3. Publishes `.tar.gz` archives and `SHA256SUMS`.
 4. Updates `Formula/jt.rb` in `owenoclee/homebrew-tap` with the macOS archive checksums.
 
 ## Homebrew tap authentication

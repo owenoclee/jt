@@ -16,6 +16,7 @@ Deno.test("Homebrew formula selects checksummed macOS archives by architecture",
   assertStringIncludes(formula, `arm:   "${ARM_SHA}"`);
   assertStringIncludes(formula, "releases/download/v1.2.3/jt-x86_64-apple-darwin.tar.gz");
   assertStringIncludes(formula, `intel: "${INTEL_SHA}"`);
+  assertStringIncludes(formula, "depends_on :macos");
   assertStringIncludes(formula, 'bin.install "jt"');
   assertStringIncludes(formula, 'shell_output("#{bin}/jt --version")');
   assertEquals(formula.endsWith("\n"), true);

@@ -9,13 +9,13 @@ mutates Jira.
 
 ## Install
 
-Install with Homebrew:
+On macOS, install with Homebrew:
 
 ```sh
 brew install owenoclee/tap/jt
 ```
 
-Alternatively, download an archive and its checksum from the
+Alternatively, download a macOS or Linux archive and its checksum from the
 [latest release](https://github.com/owenoclee/jt/releases/latest), or install from
 a checkout with Deno 2.x:
 

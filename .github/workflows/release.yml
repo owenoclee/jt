@@ -42,11 +42,6 @@ jobs:
               --output "dist/raw/jt-$target" \
               src/main.ts
           done
-          deno compile \
-            --allow-read --allow-write --allow-env --allow-net \
-            --target x86_64-pc-windows-msvc \
-            --output dist/raw/jt-x86_64-pc-windows-msvc.exe \
-            src/main.ts
       - name: Package release archives and checksums
         run: |
           for target in \
@@ -60,11 +55,6 @@ jobs:
             rm -rf "$staging"
           done
 
-          staging="$(mktemp -d)"
-          install -m 0755 dist/raw/jt-x86_64-pc-windows-msvc.exe "$staging/jt.exe"
-          (cd "$staging" && zip -q "$GITHUB_WORKSPACE/dist/release/jt-x86_64-pc-windows-msvc.zip" jt.exe)
-          rm -rf "$staging"
-
           (cd dist/release && sha256sum jt-* > SHA256SUMS)
           cat dist/release/SHA256SUMS
       - name: Verify packaged executables
@@ -75,7 +65,6 @@ jobs:
             test -x "$staging/jt"
             rm -rf "$staging"
           done
-          unzip -t dist/release/jt-x86_64-pc-windows-msvc.zip
       - name: Create release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:

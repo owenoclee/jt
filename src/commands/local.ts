@@ -8,6 +8,7 @@ import { buildCommitViews, buildSinceReview } from "../review/model.ts";
 import { localContext, withClient, withMeta } from "../context.ts";
 import { diffTickets } from "../diff.ts";
 import { fail } from "../errors.ts";
+import { makeRefContext } from "../refs.ts";
 import { bold, cyan, dim, green, red, yellow } from "../render/colors.ts";
 import { upstreamChangeCount } from "./changes.ts";
 import { renderDiffEntries, renderJournalEntry, renderStatus, renderTicket } from "../render/render.ts";
@@ -35,6 +36,7 @@ export function cmdDiff(argv: string[]): void {
     diffWeb(ctx, Boolean(args.committed), Boolean(args.all), wanted);
     return;
   }
+  const refs = makeRefContext(store, ctx.ws.config);
   const sections: string[] = [];
 
   if (args.committed) {
@@ -43,13 +45,15 @@ export function cmdDiff(argv: string[]): void {
       if (!wanted(id)) continue;
       const committed = store.readCommitted(id)!;
       if (id.startsWith("@")) {
-        sections.push(`${cyan("will create:")}\n${renderTicket(committed.ticket)}`);
+        sections.push(`${cyan("will create:")}\n${renderTicket(committed.ticket, undefined, refs)}`);
         continue;
       }
       const base = store.readBase(id);
       if (!base) continue;
       const entries = diffTickets(base.ticket, committed.ticket);
-      if (entries.length) sections.push(renderDiffEntries(id, committed.ticket.summary, entries));
+      if (entries.length) {
+        sections.push(renderDiffEntries(id, committed.ticket.summary, entries, refs));
+      }
     }
     for (const d of store.readDeletions().filter((d) => d.committed)) {
       if (!wanted(d.key)) continue;
@@ -60,7 +64,7 @@ export function cmdDiff(argv: string[]): void {
       if (!wanted(s.id)) continue;
       const working = store.readWorking(s.id);
       if (s.state === "new") {
-        sections.push(`${cyan("new (uncommitted):")}\n${renderTicket(working!.ticket)}`);
+        sections.push(`${cyan("new (uncommitted):")}\n${renderTicket(working!.ticket, undefined, refs)}`);
         continue;
       }
       if (s.state === "new+committed+modified" || s.state === "committed+modified" || s.state === "modified") {
@@ -69,7 +73,9 @@ export function cmdDiff(argv: string[]): void {
           : (store.readCommitted(s.id)?.ticket ?? store.readBase(s.id)?.ticket);
         if (!against || !working) continue;
         const entries = diffTickets(against, working.ticket);
-        if (entries.length) sections.push(renderDiffEntries(s.id, working.ticket.summary, entries));
+        if (entries.length) {
+          sections.push(renderDiffEntries(s.id, working.ticket.summary, entries, refs));
+        }
         continue;
       }
       if (s.state === "deleted") {
@@ -81,9 +87,9 @@ export function cmdDiff(argv: string[]): void {
         const working2 = working?.ticket;
         if (base && working2) {
           const entries = diffTickets(base, working2);
-          if (entries.length) sections.push(renderDiffEntries(s.id, working2.summary, entries));
+          if (entries.length) sections.push(renderDiffEntries(s.id, working2.summary, entries, refs));
         } else if (working2) {
-          sections.push(`${cyan("new (committed):")}\n${renderTicket(working2)}`);
+          sections.push(`${cyan("new (committed):")}\n${renderTicket(working2, undefined, refs)}`);
         }
       }
     }
@@ -108,6 +114,7 @@ function diffWeb(
   wanted: (id: string) => boolean,
 ): void {
   const { store } = ctx;
+  const refs = makeRefContext(store, ctx.ws.config);
   const tickets: ReviewPageModel["tickets"] = [];
   const push = (
     id: string,
@@ -116,7 +123,7 @@ function diffWeb(
     from: Ticket | null,
     to: Ticket | null,
   ) => {
-    const diffHtml = renderTicketDelta(from, to);
+    const diffHtml = renderTicketDelta(from, to, refs);
     if (diffHtml) {
       tickets.push({ id, summary, kind, unchangedSinceReview: false, diffHtml, opsJson: "" });
     }
@@ -155,8 +162,8 @@ function diffWeb(
     title: committedView ? "jt diff --committed (what push will send)" : "jt diff (uncommitted changes)",
     target: { baseUrl: ctx.ws.config.baseUrl, project: ctx.ws.config.project },
     tickets,
-    commits: buildCommitViews(store),
-    sinceReview: buildSinceReview(store, tickets.map((t) => t.id)),
+    commits: buildCommitViews(store, refs),
+    sinceReview: buildSinceReview(store, tickets.map((t) => t.id), refs),
     nonce: "",
     timeoutMs: 0,
   };
@@ -179,10 +186,11 @@ export function cmdShow(argv: string[]): void {
   }
   const target = targets[0];
   if (!target) fail("usage: jt show <KEY | @name | path> [--base|--committed] | jt show --web [KEY...]");
+  const refs = makeRefContext(store, ctx.ws.config);
 
   if (target.endsWith(".json")) {
     const wf = store.readWorkingFile(target);
-    console.log(renderTicket(wf.ticket, basename(target)));
+    console.log(renderTicket(wf.ticket, basename(target), refs));
     return;
   }
   const id = target.startsWith("@") ? target : target.toUpperCase();
@@ -199,7 +207,7 @@ export function cmdShow(argv: string[]): void {
     label = "working";
   }
   if (!ticket) fail(`no ${args.base ? "base" : args.committed ? "committed" : "working"} copy of ${id}`);
-  console.log(renderTicket(ticket, label));
+  console.log(renderTicket(ticket, label, refs));
 }
 
 /** jt show --web: read-only workspace browser — fully rendered ticket cards. */
@@ -210,6 +218,7 @@ function showWeb(
   committed: boolean,
 ): void {
   const { store } = ctx;
+  const refs = makeRefContext(store, ctx.ws.config);
   const layer = base ? "base" : committed ? "committed" : "working";
   const statuses = store.status();
   const ids = targets.length
@@ -230,7 +239,7 @@ function showWeb(
       summary: `${ticket.summary}  (${state})`,
       kind: "view",
       unchangedSinceReview: false,
-      diffHtml: renderTicketCard(ticket, "view"),
+      diffHtml: renderTicketCard(ticket, "view", refs),
       opsJson: "",
     });
   }
@@ -241,7 +250,7 @@ function showWeb(
     title: `jt workspace — ${tickets.length} ticket${tickets.length === 1 ? "" : "s"} (${layer})`,
     target: { baseUrl: ctx.ws.config.baseUrl, project: ctx.ws.config.project },
     tickets,
-    commits: buildCommitViews(store),
+    commits: buildCommitViews(store, refs),
     sinceReview: null,
     nonce: "",
     timeoutMs: 0,

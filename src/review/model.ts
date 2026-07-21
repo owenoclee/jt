@@ -6,6 +6,7 @@ import {
   snapshotEqual,
   stateAtSeq,
 } from "../chain.ts";
+import { NO_REFS, type RefContext } from "../refs.ts";
 import type { Store } from "../store.ts";
 import type { Config, Ticket } from "../types.ts";
 import { renderTicketDelta, type ReviewPageModel, type TicketSection } from "./html.ts";
@@ -16,6 +17,7 @@ export function buildPageModel(
   config: Config,
   plans: TicketPlan[],
   timeoutMs: number,
+  refs: RefContext = NO_REFS,
 ): ReviewPageModel {
   const chain = readChain(store);
   const marker = readReviewMarker(store);
@@ -37,7 +39,7 @@ export function buildPageModel(
       summary: p.summary,
       kind: p.kind,
       unchangedSinceReview,
-      diffHtml: renderTicketDelta(from, to),
+      diffHtml: renderTicketDelta(from, to, refs),
       opsJson: JSON.stringify(
         p.ops.map((o) => ({ method: o.method, path: o.path, body: o.body })),
         null,
@@ -51,8 +53,8 @@ export function buildPageModel(
     title: `jt push review — ${tickets.length} ticket${tickets.length === 1 ? "" : "s"}`,
     target: { baseUrl: config.baseUrl, project: config.project },
     tickets,
-    commits: buildCommitViews(store),
-    sinceReview: buildSinceReview(store, plans.map((p) => p.id)),
+    commits: buildCommitViews(store, refs),
+    sinceReview: buildSinceReview(store, plans.map((p) => p.id), refs),
     nonce: crypto.randomUUID(),
     timeoutMs,
   };
@@ -62,7 +64,10 @@ function snapshotTicket(s: ChainSnapshot | null): Ticket | null {
   return s && s.kind === "ticket" ? s.ticket : null;
 }
 
-export function buildCommitViews(store: Store): ReviewPageModel["commits"] {
+export function buildCommitViews(
+  store: Store,
+  refs: RefContext = NO_REFS,
+): ReviewPageModel["commits"] {
   const chain = readChain(store);
   return chain.entries.map((entry) => {
     const sections: TicketSection[] = Object.entries(entry.tickets).map(([id, snap]) => {
@@ -74,8 +79,8 @@ export function buildCommitViews(store: Store): ReviewPageModel["commits"] {
         (snap.kind === "deletion" ? ({ summary: snap.summary } as unknown as Ticket) : null);
       return {
         id,
-        title: `${id}  ${snap.kind === "deletion" ? `(deletion) ${snap.summary}` : snap.ticket.summary}`,
-        html: renderTicketDelta(snap.kind === "deletion" ? fromForDelete : from, to),
+        summary: snap.kind === "deletion" ? `(deletion) ${snap.summary}` : snap.ticket.summary,
+        html: renderTicketDelta(snap.kind === "deletion" ? fromForDelete : from, to, refs),
       };
     });
     return {
@@ -91,6 +96,7 @@ export function buildCommitViews(store: Store): ReviewPageModel["commits"] {
 export function buildSinceReview(
   store: Store,
   ids: string[],
+  refs: RefContext = NO_REFS,
 ): ReviewPageModel["sinceReview"] {
   const chain = readChain(store);
   const marker = readReviewMarker(store);
@@ -106,7 +112,7 @@ export function buildSinceReview(
     const from = snapshotTicket(priorSnap) ?? (priorSnap === null ? base?.ticket ?? null : null);
     const to = currentSnap === null || currentSnap.kind === "deletion" ? null : currentSnap.ticket;
     const summary = to?.summary ?? from?.summary ?? "";
-    sections.push({ id, title: `${id}  ${summary}`, html: renderTicketDelta(from, to) });
+    sections.push({ id, summary, html: renderTicketDelta(from, to, refs) });
   }
   return sections.length > 0 ? { fromSeq: marker.lastReviewedSeq, sections } : null;
 }

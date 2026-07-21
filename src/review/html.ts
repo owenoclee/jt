@@ -7,6 +7,7 @@
 import { marked } from "marked";
 import { diffTickets } from "../diff.ts";
 import { lineDiff } from "../diff.ts";
+import { NO_REFS, type RefContext } from "../refs.ts";
 import type { Ticket } from "../types.ts";
 
 export function escapeHtml(s: string): string {
@@ -30,8 +31,18 @@ export function mdToHtml(md: string): string {
 
 export interface TicketSection {
   id: string;
-  title: string;
+  summary: string;
   html: string;
+}
+
+/** A ticket reference as HTML: the key linked to Jira, plus its summary when known. */
+function refHtml(id: string, refs: RefContext): string {
+  const url = refs.browseUrl(id);
+  const key = url
+    ? `<a class="ref" href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(id)}</a>`
+    : escapeHtml(id);
+  const summary = refs.summaryOf(id);
+  return summary ? `${key} <span class="refsum">${escapeHtml(summary)}</span>` : key;
 }
 
 export interface ReviewPageModel {
@@ -60,22 +71,29 @@ export interface ReviewPageModel {
 }
 
 /** Full diff of a ticket between two states (null = doesn't exist on that side). */
-export function renderTicketDelta(from: Ticket | null, to: Ticket | null): string {
+export function renderTicketDelta(
+  from: Ticket | null,
+  to: Ticket | null,
+  refs: RefContext = NO_REFS,
+): string {
   if (!from && !to) return "";
-  if (!from && to) return renderTicketCard(to, "create");
+  if (!from && to) return renderTicketCard(to, "create", refs);
   if (from && !to) return `<div class="delete-card">staged deletion of <b>${escapeHtml(from.summary)}</b></div>`;
   const entries = diffTickets(from!, to!);
   if (entries.length === 0) return `<div class="nochange">no changes</div>`;
   const rows: string[] = [];
   for (const e of entries) {
     switch (e.kind) {
-      case "scalar":
+      case "scalar": {
+        const val = (v: unknown) =>
+          e.field === "parent" && typeof v === "string" ? refHtml(v, refs) : fmt(v);
         rows.push(
           `<div class="frow"><span class="fname">${escapeHtml(e.field)}</span>` +
-            `<span class="old">${fmt(e.from)}</span><span class="arrow">→</span>` +
-            `<span class="new">${fmt(e.to)}</span></div>`,
+            `<span class="old">${val(e.from)}</span><span class="arrow">→</span>` +
+            `<span class="new">${val(e.to)}</span></div>`,
         );
         break;
+      }
       case "set": {
         const chips = [
           ...e.added.map((l) => `<span class="chip add">+${escapeHtml(l)}</span>`),
@@ -89,14 +107,14 @@ export function renderTicketDelta(from: Ticket | null, to: Ticket | null): strin
           rows.push(
             `<div class="frow"><span class="fname">links</span><span class="chip add">+ ${
               escapeHtml(l.type)
-            } ${escapeHtml(l.to)}</span></div>`,
+            } ${refHtml(l.to, refs)}</span></div>`,
           );
         }
         for (const l of e.removed) {
           rows.push(
             `<div class="frow"><span class="fname">links</span><span class="chip del">− ${
               escapeHtml(l.type)
-            } ${escapeHtml(l.to)}</span></div>`,
+            } ${refHtml(l.to, refs)}</span></div>`,
           );
         }
         break;
@@ -138,7 +156,7 @@ export function renderTicketDelta(from: Ticket | null, to: Ticket | null): strin
   return rows.join("\n");
 }
 
-export function renderTicketCard(t: Ticket, badge: string): string {
+export function renderTicketCard(t: Ticket, badge: string, refs: RefContext = NO_REFS): string {
   const row = (k: string, v: string) =>
     `<div class="frow"><span class="fname">${escapeHtml(k)}</span><span>${v}</span></div>`;
   const rows: string[] = [];
@@ -147,14 +165,14 @@ export function renderTicketCard(t: Ticket, badge: string): string {
   if (t.labels.length) {
     rows.push(row("labels", t.labels.map((l) => `<span class="chip">${escapeHtml(l)}</span>`).join(" ")));
   }
-  if (t.parent) rows.push(row("parent", escapeHtml(t.parent)));
+  if (t.parent) rows.push(row("parent", refHtml(t.parent, refs)));
   if (t.sprint !== null) rows.push(row("sprint", escapeHtml(String(t.sprint))));
   if (t.assignee) rows.push(row("assignee", escapeHtml(t.assignee)));
   if (t.priority) rows.push(row("priority", escapeHtml(t.priority)));
   for (const [k, v] of Object.entries(t.fields)) {
     if (v !== null) rows.push(row(k, escapeHtml(JSON.stringify(v))));
   }
-  for (const l of t.links) rows.push(row("link", `${escapeHtml(l.type)} ${escapeHtml(l.to)}`));
+  for (const l of t.links) rows.push(row("link", `${escapeHtml(l.type)} ${refHtml(l.to, refs)}`));
   const desc = t.description !== null
     ? `<div class="desc md">${mdToHtml(t.description)}</div>`
     : "";
@@ -175,6 +193,15 @@ function fmt(v: unknown): string {
 
 export function renderPage(model: ReviewPageModel): string {
   const isReview = model.mode === "review";
+  // Header ids link to the ticket in Jira; pending creations ("@name") have nowhere to link.
+  const heading = (id: string, summary: string) => {
+    const label = id.startsWith("@")
+      ? escapeHtml(id)
+      : `<a class="ref" href="${
+        escapeHtml(`${model.target.baseUrl}/browse/${id}`)
+      }" target="_blank" rel="noopener">${escapeHtml(id)}</a>`;
+    return `<h3>${label} <span class="summary">${escapeHtml(summary)}</span></h3>`;
+  };
   const ticketCards = model.tickets.map((t) => {
     const collapsed = t.unchangedSinceReview;
     const unchangedBadge = collapsed
@@ -193,7 +220,7 @@ export function renderPage(model: ReviewPageModel): string {
     }" data-id="${escapeHtml(t.id)}">
       <header>
         <span class="badge badge-${t.kind}">${t.kind}</span>
-        <h3>${escapeHtml(t.id)} <span class="summary">${escapeHtml(t.summary)}</span></h3>
+        ${heading(t.id, t.summary)}
         ${unchangedBadge}
       </header>
       <div class="body">${t.diffHtml}</div>
@@ -224,7 +251,7 @@ export function renderPage(model: ReviewPageModel): string {
     }</div>
       ${
       c.sections.map((s) =>
-        `<section class="ticket"><header><h3>${escapeHtml(s.title)}</h3></header><div class="body">${s.html}</div></section>`
+        `<section class="ticket"><header>${heading(s.id, s.summary)}</header><div class="body">${s.html}</div></section>`
       ).join("")
     }
     </div>`
@@ -238,7 +265,7 @@ export function renderPage(model: ReviewPageModel): string {
         <div class="panel-note">Everything that changed since you last reviewed (commit #${model.sinceReview.fromSeq}).</div>
         ${
       model.sinceReview.sections.map((s) =>
-        `<section class="ticket"><header><h3>${escapeHtml(s.title)}</h3></header><div class="body">${s.html}</div></section>`
+        `<section class="ticket"><header>${heading(s.id, s.summary)}</header><div class="body">${s.html}</div></section>`
       ).join("")
     }
       </div>`
@@ -393,6 +420,11 @@ section.ticket.collapsed > header { border-bottom: none; }
 .body { padding: 12px 14px; }
 .frow { display: flex; gap: 10px; align-items: baseline; padding: 3px 0; flex-wrap: wrap; }
 .fname { color: var(--muted); min-width: 90px; font-size: 12px; }
+a.ref { color: inherit; text-decoration: underline dotted; text-underline-offset: 2px; }
+a.ref:hover { color: var(--accent); }
+h3 a.ref { text-decoration: none; }
+h3 a.ref:hover { text-decoration: underline; }
+.refsum { color: var(--muted); font-size: 12px; }
 .old { color: var(--del-fg); text-decoration: line-through; }
 .new { color: var(--add-fg); }
 .arrow { color: var(--muted); }

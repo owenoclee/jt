@@ -9,6 +9,7 @@ import { readChain, writeReviewMarker } from "../chain.ts";
 import { checkStaleness, executePush, type PushContext } from "../commands/push.ts";
 import type { CompiledPush } from "../compile.ts";
 import { UserError } from "../errors.ts";
+import { makeRefContext } from "../refs.ts";
 import { bold, cyan, dim, green, red, yellow } from "../render/colors.ts";
 import { renderPage, type ReviewPageModel } from "./html.ts";
 import { buildPageModel } from "./model.ts";
@@ -39,7 +40,8 @@ export async function runReviewFlow(
 ): Promise<ReviewOutcome> {
   const { store } = ctx;
   const plans = buildTicketPlans(store, compiled.ops);
-  const model = buildPageModel(store, ctx.ws.config, plans, opts.timeoutMs);
+  const refs = makeRefContext(store, ctx.ws.config);
+  const model = buildPageModel(store, ctx.ws.config, plans, opts.timeoutMs, refs);
 
   for (const w of compiled.warnings) console.log(`${yellow("warning:")} ${w}`);
   const decision = await serveAndAwait(model, opts);

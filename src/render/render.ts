@@ -2,6 +2,7 @@
 import { bold, cyan, dim, green, red, yellow } from "./colors.ts";
 import type { DiffEntry } from "../diff.ts";
 import { lineDiff } from "../diff.ts";
+import { NO_REFS, type RefContext } from "../refs.ts";
 import type { JournalEntry, Ticket, TicketStatus } from "../types.ts";
 
 export function renderStatus(statuses: TicketStatus[], opts: { all?: boolean } = {}): string {
@@ -61,13 +62,21 @@ function stateBadge(state: TicketStatus["state"]): string {
   }
 }
 
-export function renderDiffEntries(id: string, summary: string, entries: DiffEntry[]): string {
+export function renderDiffEntries(
+  id: string,
+  summary: string,
+  entries: DiffEntry[],
+  refs: RefContext = NO_REFS,
+): string {
   const lines: string[] = [`${bold(id)}  ${summary}`];
   for (const e of entries) {
     switch (e.kind) {
-      case "scalar":
-        lines.push(`  ${cyan(e.field)}: ${fmtValue(e.from)} ${dim("→")} ${fmtValue(e.to)}`);
+      case "scalar": {
+        const val = (v: unknown) =>
+          e.field === "parent" && typeof v === "string" ? fmtRef(v, refs) : fmtValue(v);
+        lines.push(`  ${cyan(e.field)}: ${val(e.from)} ${dim("→")} ${val(e.to)}`);
         break;
+      }
       case "set": {
         const parts = [
           ...e.added.map((l) => green(`+${l}`)),
@@ -77,8 +86,12 @@ export function renderDiffEntries(id: string, summary: string, entries: DiffEntr
         break;
       }
       case "links":
-        for (const l of e.added) lines.push(`  ${cyan("links")}: ${green(`+ ${l.type} ${l.to}`)}`);
-        for (const l of e.removed) lines.push(`  ${cyan("links")}: ${red(`- ${l.type} ${l.to}`)}`);
+        for (const l of e.added) {
+          lines.push(`  ${cyan("links")}: ${green(`+ ${l.type} ${fmtRef(l.to, refs)}`)}`);
+        }
+        for (const l of e.removed) {
+          lines.push(`  ${cyan("links")}: ${red(`- ${l.type} ${fmtRef(l.to, refs)}`)}`);
+        }
         break;
       case "comments":
         for (const c of e.added) {
@@ -124,7 +137,13 @@ function fmtValue(v: unknown): string {
   return JSON.stringify(v);
 }
 
-export function renderTicket(t: Ticket, label?: string): string {
+/** A ticket reference: the key, plus its summary in parens when locally known. */
+function fmtRef(id: string, refs: RefContext): string {
+  const summary = refs.summaryOf(id);
+  return summary ? `${id} ${dim(`(${summary})`)}` : id;
+}
+
+export function renderTicket(t: Ticket, label?: string, refs: RefContext = NO_REFS): string {
   const lines: string[] = [];
   const head = t.key ? `${bold(t.key)}  ${t.summary}` : `${cyan("(new)")}  ${t.summary}`;
   lines.push(label ? `${head}  ${dim(`[${label}]`)}` : head);
@@ -132,7 +151,7 @@ export function renderTicket(t: Ticket, label?: string): string {
   row("project", `${t.project} / ${t.type}`);
   if (t.status) row("status", t.status);
   row("labels", t.labels.length ? t.labels.join(", ") : dim("(none)"));
-  row("parent", t.parent ?? dim("(none)"));
+  row("parent", t.parent ? fmtRef(t.parent, refs) : dim("(none)"));
   row("sprint", t.sprint === null ? dim("(backlog)") : String(t.sprint));
   row("assignee", t.assignee ?? dim("(unassigned)"));
   row("priority", t.priority ?? dim("(none)"));
@@ -140,7 +159,7 @@ export function renderTicket(t: Ticket, label?: string): string {
   for (const [k, v] of Object.entries(t.fields)) {
     row(k, v === null ? dim("(none)") : JSON.stringify(v));
   }
-  for (const l of t.links) row("link", `${l.type} ${l.to}`);
+  for (const l of t.links) row("link", `${l.type} ${fmtRef(l.to, refs)}`);
   if (t.description !== null) {
     lines.push("");
     if (t.descriptionLossy) {

@@ -8,13 +8,15 @@ import { parseArgs } from "@std/cli";
 import { ticketsEqual } from "../canonical.ts";
 import { localContext } from "../context.ts";
 import { diffTickets } from "../diff.ts";
+import { makeRefContext } from "../refs.ts";
 import { bold, dim, green, red } from "../render/colors.ts";
 import { renderDiffEntries } from "../render/render.ts";
 import type { Store } from "../store.ts";
 
 export function cmdChanges(argv: string[]): void {
   const args = parseArgs(argv, { boolean: ["ack"] });
-  const { store } = localContext();
+  const { store, ws } = localContext();
+  const refs = makeRefContext(store, ws.config);
   const filter = (args._ as string[]).map((k) => String(k).toUpperCase());
   const wanted = (k: string) => filter.length === 0 || filter.includes(k);
 
@@ -61,7 +63,7 @@ export function cmdChanges(argv: string[]): void {
       const entries = diffTickets(seen.ticket, base.ticket);
       if (entries.length === 0) continue;
       changed++;
-      sections.push(renderDiffEntries(key, base.ticket.summary, entries));
+      sections.push(renderDiffEntries(key, base.ticket.summary, entries, refs));
     }
   }
 

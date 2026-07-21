@@ -36,6 +36,9 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
                             tickets flow in; 3-way rebase, conflicts flagged
     jt changes [KEY...]     upstream edits since your last ack: new / changed / gone
     jt changes --ack        absorb them — records current remote state as seen
+    jt changes --web [--timeout SECS]
+                            the same news as a glanceable page (purple = informational,
+                            nothing sent); its Acknowledge button records the ack
     jt fetch KEY... | --jql '...' [--limit N]   track tickets one by one
     jt status [--all]       working vs committed vs base, per ticket (--all lists clean)
     jt diff [ID...]         uncommitted changes (working vs committed/base)
@@ -80,7 +83,7 @@ async function main(): Promise<void> {
     case "pull":
       return await cmdPull(rest);
     case "changes":
-      return cmdChanges(rest);
+      return await cmdChanges(rest);
     case "status":
       return cmdStatus(rest);
     case "diff":

@@ -52,6 +52,12 @@ Surface `jt changes` output to the user when it's non-empty (it is their morning
 briefing), and run `jt changes --ack` only after the news has actually been seen or
 acted on — acking is a statement that the board's current state is known.
 
+`jt changes --web` serves the same news as a glanceable browser page (purple =
+informational; nothing is ever sent from it) with an Acknowledge button, so the user
+can see and ack in one place. Like the review page: jt prints `changes page: <url>`
+and waits (default 600s; `--timeout SECS`); open the URL for the user, never load it
+yourself. Closing the tab or timing out acks nothing.
+
 ## The workflow contract
 
 ```
@@ -144,7 +150,8 @@ change what push sends — it just shows up as a new uncommitted change afterwar
   "links": [{ "type": "blocks", "to": "PROJ-99" }],   // phrases from `jt meta show`
   "comments": [ { "id": "…", "body": "existing — read-only" },
                 { "body": "new comment to post" } ],
-  "fields": { "Story Points": 5 }       // tracked custom fields by display name
+  "fields": { "Story Points": 5,        // tracked custom fields by display name
+              "Components": ["api"] }   // array fields (components, multi-option): plain name lists
 }
 ```
 

@@ -3,20 +3,51 @@
  *
  * Diffs the seen layer (last-acked remote state) against base (current remote state),
  * canonical-vs-canonical. Read-only bookkeeping: seen never feeds compile or push.
+ * --web serves the same news as a glanceable purple "informational" page whose only
+ * action is Acknowledge (equivalent to jt changes --ack).
  */
 import { parseArgs } from "@std/cli";
 import { ticketsEqual } from "../canonical.ts";
 import { localContext } from "../context.ts";
-import { diffTickets } from "../diff.ts";
+import { type DiffEntry, diffTickets } from "../diff.ts";
+import { fail } from "../errors.ts";
 import { makeRefContext } from "../refs.ts";
 import { bold, dim, green, red } from "../render/colors.ts";
 import { renderDiffEntries } from "../render/render.ts";
+import {
+  escapeHtml,
+  renderPage,
+  renderTicketCard,
+  renderTicketDelta,
+  type ReviewPageModel,
+} from "../review/html.ts";
 import type { Store } from "../store.ts";
+import type { Ticket } from "../types.ts";
 
-export function cmdChanges(argv: string[]): void {
-  const args = parseArgs(argv, { boolean: ["ack"] });
-  const { store, ws } = localContext();
-  const refs = makeRefContext(store, ws.config);
+export interface ChangesWebOptions {
+  timeoutMs?: number;
+  port?: number;
+  /** Test hook: called with the page URL once the server is listening. */
+  onServe?: (url: string) => void;
+}
+
+interface ChangeItem {
+  key: string;
+  kind: "new" | "changed" | "gone" | "conflict";
+  summary: string;
+  seen: Ticket | null;
+  base: Ticket | null;
+  entries: DiffEntry[];
+  conflictFields: string[];
+}
+
+export function cmdChanges(argv: string[], webOpts: ChangesWebOptions = {}): void | Promise<void> {
+  const args = parseArgs(argv, { boolean: ["ack", "web"], string: ["timeout"] });
+  if (args.ack && args.web) {
+    fail("--ack and --web are mutually exclusive — the web page has an Acknowledge button");
+  }
+  const ctx = localContext();
+  const { store } = ctx;
   const filter = (args._ as string[]).map((k) => String(k).toUpperCase());
   const wanted = (k: string) => filter.length === 0 || filter.includes(k);
 
@@ -33,39 +64,52 @@ export function cmdChanges(argv: string[]): void {
 
   const conflicts = new Map(store.readConflicts().map((c) => [c.key, c]));
   const keys = [...new Set([...baseKeys, ...seenKeys])].sort().filter(wanted);
-  const sections: string[] = [];
-  let added = 0;
-  let changed = 0;
-  let gone = 0;
+  const items: ChangeItem[] = [];
 
   for (const key of keys) {
-    const base = store.readBase(key);
-    const seen = store.readSeen(key);
+    const base = store.readBase(key)?.ticket ?? null;
+    const seen = store.readSeen(key)?.ticket ?? null;
+    const item = (kind: ChangeItem["kind"], summary: string, entries: DiffEntry[] = []) =>
+      items.push({
+        key,
+        kind,
+        summary,
+        seen,
+        base,
+        entries,
+        conflictFields: conflicts.get(key)?.fields ?? [],
+      });
     if (conflicts.has(key)) {
-      const cf = conflicts.get(key)!;
-      changed++;
-      sections.push(
-        `${red("conflict")}  ${bold(key)}  remote changed ${cf.fields.join(", ")} — ` +
-          `held back until: jt resolve ${key}`,
-      );
-      continue;
-    }
-    if (base && !seen) {
-      added++;
-      const meta = `${base.ticket.type}${base.ticket.status ? ` · ${base.ticket.status}` : ""}`;
-      sections.push(`${green("new     ")}  ${bold(key)}  ${base.ticket.summary}  ${dim(`(${meta})`)}`);
+      item("conflict", (base ?? seen)?.summary ?? "");
+    } else if (base && !seen) {
+      item("new", base.summary);
     } else if (!base && seen) {
-      gone++;
-      sections.push(
-        `${red("gone    ")}  ${bold(key)}  ${seen.ticket.summary}  ${dim("(deleted or left the board)")}`,
-      );
+      item("gone", seen.summary);
     } else if (base && seen) {
-      const entries = diffTickets(seen.ticket, base.ticket);
-      if (entries.length === 0) continue;
-      changed++;
-      sections.push(renderDiffEntries(key, base.ticket.summary, entries, refs));
+      const entries = diffTickets(seen, base);
+      if (entries.length > 0) item("changed", base.summary, entries);
     }
   }
+
+  const ackKeys = filter.length ? keys : undefined;
+  if (args.web) return changesWeb(ctx, items, ackKeys, webOpts, args.timeout);
+
+  const refs = makeRefContext(store, ctx.ws.config);
+  const sections = items.map((it) => {
+    switch (it.kind) {
+      case "conflict":
+        return `${red("conflict")}  ${bold(it.key)}  remote changed ${it.conflictFields.join(", ")} — ` +
+          `held back until: jt resolve ${it.key}`;
+      case "new": {
+        const meta = `${it.base!.type}${it.base!.status ? ` · ${it.base!.status}` : ""}`;
+        return `${green("new     ")}  ${bold(it.key)}  ${it.base!.summary}  ${dim(`(${meta})`)}`;
+      }
+      case "gone":
+        return `${red("gone    ")}  ${bold(it.key)}  ${it.seen!.summary}  ${dim("(deleted or left the board)")}`;
+      case "changed":
+        return renderDiffEntries(it.key, it.base!.summary, it.entries, refs);
+    }
+  });
 
   if (sections.length === 0) {
     console.log(
@@ -74,6 +118,9 @@ export function cmdChanges(argv: string[]): void {
         : "no upstream changes since your last ack",
     );
   } else {
+    const added = items.filter((i) => i.kind === "new").length;
+    const gone = items.filter((i) => i.kind === "gone").length;
+    const changed = items.length - added - gone;
     console.log(sections.join("\n\n"));
     console.log("");
     console.log(
@@ -85,9 +132,110 @@ export function cmdChanges(argv: string[]): void {
   }
 
   if (args.ack) {
-    store.ackSeen(filter.length ? keys : undefined);
+    store.ackSeen(ackKeys);
     console.log(dim(filter.length ? `acknowledged: ${keys.join(", ")}` : "acknowledged — all caught up"));
   }
+}
+
+/** jt changes --web: the upstream news as a page; the Acknowledge button acks and exits. */
+function changesWeb(
+  ctx: ReturnType<typeof localContext>,
+  items: ChangeItem[],
+  ackKeys: string[] | undefined,
+  opts: ChangesWebOptions,
+  timeoutArg: string | undefined,
+): void | Promise<void> {
+  if (items.length === 0) {
+    console.log(
+      ackKeys
+        ? "no upstream changes for those tickets since your last ack"
+        : "no upstream changes since your last ack",
+    );
+    return;
+  }
+  const { store } = ctx;
+  const refs = makeRefContext(store, ctx.ws.config);
+  const tickets: ReviewPageModel["tickets"] = items.map((it) => {
+    let diffHtml: string;
+    switch (it.kind) {
+      case "new":
+        diffHtml = renderTicketCard(it.base!, "new", refs);
+        break;
+      case "gone":
+        diffHtml = `<div class="delete-card">deleted or left the board since your last ack</div>`;
+        break;
+      case "conflict":
+        diffHtml = `<div class="conflict-card">remote changed <b>${
+          escapeHtml(it.conflictFields.join(", "))
+        }</b> — held back until: <code>jt resolve ${escapeHtml(it.key)}</code></div>`;
+        break;
+      case "changed":
+        diffHtml = renderTicketDelta(it.seen, it.base, refs);
+        break;
+    }
+    return { id: it.key, summary: it.summary, kind: it.kind, unchangedSinceReview: false, diffHtml, opsJson: "" };
+  });
+
+  const timeoutMs = opts.timeoutMs ?? (timeoutArg ? Number(timeoutArg) * 1000 : 600_000);
+  const model: ReviewPageModel = {
+    mode: "info",
+    title: `jt changes — ${items.length} upstream change${items.length === 1 ? "" : "s"} since your last ack`,
+    target: { baseUrl: ctx.ws.config.baseUrl, project: ctx.ws.config.project },
+    tickets,
+    commits: [],
+    sinceReview: null,
+    nonce: crypto.randomUUID(),
+    timeoutMs,
+  };
+  return serveChangesPage(model, opts, timeoutMs, () => {
+    store.ackSeen(ackKeys);
+    console.log(dim(ackKeys ? `acknowledged: ${ackKeys.join(", ")}` : "acknowledged — all caught up"));
+  });
+}
+
+/** Serve the page on loopback and wait for one Acknowledge POST (or timeout = no ack). */
+async function serveChangesPage(
+  model: ReviewPageModel,
+  opts: ChangesWebOptions,
+  timeoutMs: number,
+  onAck: () => void,
+): Promise<void> {
+  const html = renderPage(model);
+  let resolveAck!: (acked: boolean) => void;
+  const acked = new Promise<boolean>((r) => (resolveAck = r));
+  let done = false;
+
+  const server = Deno.serve(
+    { hostname: "127.0.0.1", port: opts.port ?? 0, onListen: () => {} },
+    (req) => {
+      const url = new URL(req.url);
+      if (req.method === "GET" && url.pathname === `/changes/${model.nonce}`) {
+        return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+      }
+      if (req.method === "POST" && url.pathname === `/ack/${model.nonce}` && !done) {
+        done = true;
+        resolveAck(true);
+        return Response.json({ ok: true });
+      }
+      return new Response("not found", { status: 404 });
+    },
+  );
+
+  const addr = server.addr as Deno.NetAddr;
+  const url = `http://127.0.0.1:${addr.port}/changes/${model.nonce}`;
+  console.log(`${bold("changes page:")} ${url}`);
+  console.log(dim("glance it over — Acknowledge there records it as seen; waiting..."));
+  opts.onServe?.(url);
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<boolean>((r) => {
+    timer = setTimeout(() => r(false), timeoutMs);
+  });
+  const wasAcked = await Promise.race([acked, timeout]);
+  clearTimeout(timer);
+  await server.shutdown();
+  if (wasAcked) onAck();
+  else console.log(dim("page expired without an ack — nothing recorded (jt changes --ack also works)"));
 }
 
 /** New + changed + gone count for the status footer. Conflicted tickets are already badged there. */

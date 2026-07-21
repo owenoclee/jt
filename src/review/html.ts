@@ -46,13 +46,18 @@ function refHtml(id: string, refs: RefContext): string {
 }
 
 export interface ReviewPageModel {
-  mode: "review" | "readonly";
+  /**
+   * "review" = decision page (approve/request), "readonly" = static diff/show,
+   * "info" = upstream news (jt changes --web): purple-badged glance page whose only
+   * action is Acknowledge — nothing is ever sent from it.
+   */
+  mode: "review" | "readonly" | "info";
   title: string;
   target: { baseUrl: string; project: string };
   tickets: {
     id: string;
     summary: string;
-    kind: "create" | "update" | "delete" | "view";
+    kind: "create" | "update" | "delete" | "view" | "new" | "changed" | "gone" | "conflict";
     /** Byte-identical to what the user saw at their last review — collapsed by default. */
     unchangedSinceReview: boolean;
     diffHtml: string;
@@ -193,6 +198,7 @@ function fmt(v: unknown): string {
 
 export function renderPage(model: ReviewPageModel): string {
   const isReview = model.mode === "review";
+  const isInfo = model.mode === "info";
   // Header ids link to the ticket in Jira; pending creations ("@name") have nowhere to link.
   const heading = (id: string, summary: string) => {
     const label = id.startsWith("@")
@@ -277,6 +283,18 @@ export function renderPage(model: ReviewPageModel): string {
         <button id="request" type="button">Request changes</button>
         <button id="approve" type="button">Approve &amp; push all ${model.tickets.length}</button>
       </footer>`
+    : isInfo
+    ? `<footer class="sendbar">
+        <span id="countdown"></span>
+        <span class="ack-hint">closing the tab acknowledges nothing</span>
+        <button id="ack" type="button">Acknowledge all ${model.tickets.length}</button>
+      </footer>`
+    : "";
+
+  const infoBanner = isInfo
+    ? `<div class="info-banner"><span class="info-glyph">↓</span> upstream news — a read-only
+       glance at what changed in Jira since your last ack. Nothing is sent from this page;
+       Acknowledge only records it as seen.</div>`
     : "";
 
   const reviewJs = isReview
@@ -326,6 +344,23 @@ export function renderPage(model: ReviewPageModel): string {
     document.getElementById('approve').addEventListener('click', () => send('approve'));
     document.getElementById('request').addEventListener('click', () => send('request-changes'));`
     : "";
+  const infoJs = isInfo
+    ? `
+    const nonce = ${JSON.stringify(model.nonce)};
+    const deadline = Date.now() + ${model.timeoutMs};
+    setInterval(() => {
+      const left = Math.max(0, deadline - Date.now());
+      const m = Math.floor(left / 60000), s = Math.floor((left % 60000) / 1000);
+      document.getElementById('countdown').textContent =
+        left > 0 ? 'page expires in ' + m + 'm ' + String(s).padStart(2, '0') + 's' : 'expired';
+    }, 500);
+    document.getElementById('ack').addEventListener('click', async () => {
+      const res = await fetch('/ack/' + nonce, { method: 'POST' });
+      document.body.innerHTML = res.ok
+        ? '<div class="done">Acknowledged — current remote state recorded as seen. You can close this tab.</div>'
+        : '<div class="done">Something went wrong (' + res.status + '). Check the terminal.</div>';
+    });`
+    : "";
   const expandJs = `
     document.querySelectorAll('.expand').forEach((b) => b.addEventListener('click', () => {
       b.closest('section.ticket').classList.remove('collapsed');
@@ -340,11 +375,12 @@ export function renderPage(model: ReviewPageModel): string {
 <title>${escapeHtml(model.title)}</title>
 <style>${CSS}</style>
 </head>
-<body>
+<body${isInfo ? ' class="info"' : ""}>
 <header class="top">
   <h1>${escapeHtml(model.title)}</h1>
   <div class="target">→ ${escapeHtml(model.target.baseUrl)} · project ${escapeHtml(model.target.project)}</div>
 </header>
+${infoBanner}
 <nav class="tabs">
   <button class="tab active" data-tab="changes">changes (${model.tickets.length})</button>
   ${sinceTab}
@@ -365,6 +401,7 @@ document.querySelectorAll('.tab').forEach((b) => b.addEventListener('click', () 
 }));
 ${expandJs}
 ${reviewJs}
+${infoJs}
 </script>
 </body>
 </html>`;
@@ -374,13 +411,13 @@ const CSS = `
 :root {
   --bg: #ffffff; --fg: #1f2328; --muted: #656d76; --border: #d1d9e0;
   --card: #f6f8fa; --add-bg: #dafbe1; --add-fg: #116329; --del-bg: #ffebe9; --del-fg: #82071e;
-  --accent: #0969da; --warn: #9a6700;
+  --accent: #0969da; --warn: #9a6700; --info: #8250df; --info-bg: #fbefff;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #0d1117; --fg: #e6edf3; --muted: #8d96a0; --border: #30363d;
     --card: #161b22; --add-bg: #12261e; --add-fg: #3fb950; --del-bg: #25171c; --del-fg: #f85149;
-    --accent: #4493f8; --warn: #d29922;
+    --accent: #4493f8; --warn: #d29922; --info: #a371f7; --info-bg: #2a2140;
   }
 }
 * { box-sizing: border-box; }
@@ -411,6 +448,21 @@ section.ticket h3 { margin: 0; font-size: 14px; }
 .badge-update { background: var(--card); color: var(--accent); border: 1px solid var(--border); }
 .badge-delete { background: var(--del-bg); color: var(--del-fg); }
 .badge-view { background: var(--card); color: var(--muted); border: 1px solid var(--border); }
+.badge-new { background: var(--add-bg); color: var(--add-fg); }
+.badge-changed { background: var(--info-bg); color: var(--info); }
+.badge-gone { background: var(--del-bg); color: var(--del-fg); }
+.badge-conflict { background: none; color: var(--warn); border: 1px solid var(--warn); }
+/* Informational identity (jt changes --web): purple ribbon + banner + card spines make
+   the glance-and-close page unmistakable next to the neutral review/diff pages. */
+body.info { border-top: 4px solid var(--info); }
+body.info .top h1 { color: var(--info); }
+.info-banner { background: var(--info-bg); color: var(--info); padding: 8px 20px; font-size: 13px; }
+.info-glyph { font-weight: 700; margin-right: 4px; }
+body.info section.ticket { border-left: 4px solid var(--info); }
+.conflict-card { color: var(--warn); border: 1px solid var(--warn); border-radius: 6px; padding: 10px 14px; }
+.ack-hint { color: var(--muted); font-size: 12px; }
+#ack { background: var(--info); color: #fff; border: none; border-radius: 6px; padding: 8px 18px; font: inherit; font-weight: 600; cursor: pointer; }
+#ack:hover { filter: brightness(1.1); }
 .unchanged { font-size: 12px; color: var(--add-fg); margin-left: auto; }
 .expand { background: none; border: 1px solid var(--border); color: var(--muted); border-radius: 6px; padding: 2px 8px; font: inherit; font-size: 11px; cursor: pointer; }
 section.ticket.collapsed .body,

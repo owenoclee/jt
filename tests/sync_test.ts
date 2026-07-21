@@ -1,5 +1,6 @@
 import { assert, assertEquals } from "@std/assert";
-import { serializeTicket } from "../src/canonical.ts";
+import { serializeTicket, ticketsEqual } from "../src/canonical.ts";
+import { diffTickets } from "../src/diff.ts";
 import { integrateFetched } from "../src/sync.ts";
 import { makeBaseEntry, makeTicket, tempStore } from "./helpers.ts";
 
@@ -113,4 +114,55 @@ Deno.test("integrate: committed layer is rebased too and dropped when it equals 
   integrateFetched(store, v2);
   assertEquals(store.readCommitted("TST-1"), null); // nothing left to push
   assertEquals(store.status()[0].state, "clean");
+});
+
+Deno.test("updated: invisible to diff, equality, and conflict detection", () => {
+  const a = makeTicket({ key: "TST-1", updated: "2026-01-01T00:00:00.000Z" });
+  const b = makeTicket({ key: "TST-1", updated: "2026-02-01T00:00:00.000Z" });
+  assertEquals(diffTickets(a, b), []);
+  assert(ticketsEqual(a, b));
+});
+
+Deno.test("updated: stamps working files on fetch and refreshes on rebase", () => {
+  const store = tempStore();
+  const v1 = makeBaseEntry(
+    makeTicket({ key: "TST-1", summary: "v1", updated: "2026-01-01T00:00:00.000Z" }),
+  );
+  integrateFetched(store, v1);
+  assertEquals(store.readWorking("TST-1")!.ticket.updated, "2026-01-01T00:00:00.000Z");
+
+  const w = store.readWorking("TST-1")!.ticket;
+  store.writeWorking("TST-1", { ...w, labels: ["local-label"] });
+  const v2 = makeBaseEntry(
+    makeTicket({ key: "TST-1", summary: "v2", updated: "2026-02-01T00:00:00.000Z" }),
+    { updated: "2026-02-01T00:00:00.000Z" },
+  );
+  const result = integrateFetched(store, v2);
+  assertEquals(result.kind, "rebased");
+  const after = store.readWorking("TST-1")!.ticket;
+  assertEquals(after.updated, "2026-02-01T00:00:00.000Z");
+  assertEquals(after.labels, ["local-label"]);
+});
+
+Deno.test("updated: committed byte-copy keeps its commit-time value through a rebase", () => {
+  const store = tempStore();
+  const v1 = makeBaseEntry(
+    makeTicket({ key: "TST-1", summary: "v1", updated: "2026-01-01T00:00:00.000Z" }),
+  );
+  integrateFetched(store, v1);
+  const w = store.readWorking("TST-1")!.ticket;
+  const edited = { ...w, summary: "local edit" };
+  store.writeWorking("TST-1", edited);
+  store.writeCommitted("TST-1", serializeTicket(edited));
+  const before = store.readCommitted("TST-1")!.bytes;
+
+  // Remote bumped only its timestamp (e.g. an untracked field changed there).
+  const v2 = makeBaseEntry(
+    makeTicket({ key: "TST-1", summary: "v1", updated: "2026-02-01T00:00:00.000Z" }),
+    { updated: "2026-02-01T00:00:00.000Z" },
+  );
+  const result = integrateFetched(store, v2);
+  assertEquals(result.kind, "rebased");
+  assertEquals(store.readCommitted("TST-1")!.bytes, before); // reviewed bytes unchanged
+  assertEquals(store.readWorking("TST-1")!.ticket.updated, "2026-02-01T00:00:00.000Z");
 });

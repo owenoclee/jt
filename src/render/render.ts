@@ -136,6 +136,7 @@ export function renderTicket(t: Ticket, label?: string): string {
   row("sprint", t.sprint === null ? dim("(backlog)") : String(t.sprint));
   row("assignee", t.assignee ?? dim("(unassigned)"));
   row("priority", t.priority ?? dim("(none)"));
+  if (t.updated) row("updated", dim(t.updated));
   for (const [k, v] of Object.entries(t.fields)) {
     row(k, v === null ? dim("(none)") : JSON.stringify(v));
   }

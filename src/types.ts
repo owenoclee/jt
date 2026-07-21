@@ -23,6 +23,11 @@ export interface CommentEntry {
 export interface Ticket {
   /** Absent for tickets not yet created in Jira. */
   key?: string;
+  /**
+   * Jira's last-updated timestamp as of the last fetch. Informational only: never
+   * diffed, merged, or pushed, and absent on pending creations.
+   */
+  updated?: string;
   project: string;
   type: string;
   summary: string;

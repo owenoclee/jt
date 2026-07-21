@@ -19,6 +19,7 @@ export const CommentEntrySchema = z.strictObject({
 
 export const TicketSchema = z.strictObject({
   key: z.string().regex(/^[A-Z][A-Z0-9_]*-\d+$/, "not a valid issue key").optional(),
+  updated: z.string().min(1).optional(),
   project: z.string().min(1),
   type: z.string().min(1),
   summary: z.string().min(1),

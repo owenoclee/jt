@@ -110,6 +110,7 @@ export function issueToBaseEntry(issue: any, meta: Meta, config: Config): BaseEn
 
   const ticket: Ticket = {
     key: issue.key,
+    ...(f.updated ? { updated: f.updated as string } : {}),
     project: f.project?.key ?? config.project,
     type: f.issuetype?.name ?? "Task",
     summary: f.summary ?? "",
@@ -245,7 +246,13 @@ export function integrateFetched(store: Store, fresh: BaseEntry): IntegrateResul
     return out;
   };
 
-  if (working) store.writeWorking(key, rebase(working.ticket));
+  // `updated` refreshes in the working copy only: the committed byte-copy keeps its
+  // commit-time value so a timestamp-only remote bump can't churn reviewed bytes.
+  if (working) {
+    const rebased = rebase(working.ticket);
+    rebased.updated = fresh.ticket.updated;
+    store.writeWorking(key, rebased);
+  }
   if (committed) {
     const rebased = rebase(committed.ticket);
     if (ticketsEqual(rebased, fresh.ticket)) store.removeCommitted(key);

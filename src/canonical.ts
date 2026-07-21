@@ -9,6 +9,7 @@ import type { CommentEntry, LinkEntry, Ticket } from "./types.ts";
 
 const KEY_ORDER: (keyof Ticket)[] = [
   "key",
+  "updated",
   "project",
   "type",
   "summary",
@@ -42,6 +43,7 @@ export function normalizeTicket(t: Ticket): Ticket {
     delete out.descriptionLossy;
   }
   if (out.key === undefined) delete out.key;
+  if (out.updated === undefined) delete out.updated;
   if (out.status === undefined) delete out.status;
   return out;
 }
@@ -85,7 +87,7 @@ export function deepEqual(a: unknown, b: unknown): boolean {
   return ak.every((k, i) => k === bk[i] && deepEqual(ao[k], bo[k]));
 }
 
-/** Field-level equality of tickets, ignoring ordering and the informational lossy flag. */
+/** Field-level equality of tickets, ignoring ordering and the informational fields. */
 export function ticketsEqual(a: Ticket, b: Ticket): boolean {
   return serializeForCompare(a) === serializeForCompare(b);
 }
@@ -93,10 +95,15 @@ export function ticketsEqual(a: Ticket, b: Ticket): boolean {
 function serializeForCompare(t: Ticket): string {
   const n = normalizeTicket(t);
   delete n.descriptionLossy;
+  delete n.updated;
   return serializeTicket(n);
 }
 
-/** The set of diffable top-level field names, with custom fields expanded as "fields.<alias>". */
+/**
+ * The set of diffable top-level field names, with custom fields expanded as
+ * "fields.<alias>". Informational fields (`descriptionLossy`, `updated`) are excluded,
+ * which is what keeps them out of diffs, merges, conflicts, and compiled pushes.
+ */
 export function ticketFieldNames(...tickets: Ticket[]): string[] {
   const names = new Set<string>([
     "project",

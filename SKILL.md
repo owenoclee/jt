@@ -131,6 +131,7 @@ change what push sends — it just shows up as a new uncommitted change afterwar
 ```jsonc
 {
   "key": "PROJ-123",                    // absent on new tickets
+  "updated": "2026-07-21T09:14:03.000+0000",  // remote last-updated as of fetch — read-only, ignored by diff/push
   "project": "PROJ",
   "type": "Story",                      // "Epic" for epics — resolved via meta
   "summary": "…",

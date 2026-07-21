@@ -5,7 +5,7 @@
  * canonical-vs-canonical. Read-only bookkeeping: seen never feeds compile or push.
  */
 import { parseArgs } from "@std/cli";
-import { serializeTicket } from "../canonical.ts";
+import { ticketsEqual } from "../canonical.ts";
 import { localContext } from "../context.ts";
 import { diffTickets } from "../diff.ts";
 import { bold, dim, green, red } from "../render/colors.ts";
@@ -103,7 +103,7 @@ export function upstreamChangeCount(store: Store): number {
       count++;
       continue;
     }
-    if (serializeTicket(base.ticket) !== seen.bytes) count++;
+    if (!ticketsEqual(base.ticket, seen.ticket)) count++;
   }
   return count;
 }

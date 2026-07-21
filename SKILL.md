@@ -86,8 +86,7 @@ waits — it does not launch a browser (sandboxed shells can't). Extract that UR
 the output and hand it to the OS opener for the user, e.g. `open "<url>"` on macOS
 (this may need to run outside the sandbox). Launching the user's browser at the URL
 is expected and required; what is forbidden is YOU loading it — never fetch(), curl,
-or drive browser-automation tools at the review URL. jt itself accepts `--open` for
-humans running it directly in a normal terminal.
+or drive browser-automation tools at the review URL.
 
 `jt commit -m` messages become the round history on the page — write them for the
 reviewer. Plain `jt push` (no browser gate) still exists for non-interactive use.
@@ -180,10 +179,10 @@ parents before children, then renames the files to their real keys.
   `--committed` shows what's staged for push.
 - `jt show --web [KEY...]` writes a read-only workspace-browser page (fully rendered
   ticket cards; no args = all tracked tickets) and prints its path — open it for the
-  user (or pass `--open`). Use it to show the user what a fetch brought down.
+  user. Use it to show the user what a fetch brought down.
 - `jt diff --web` writes the current diff as a read-only browser page (same renderer
-  as the review page) and prints its file path — open that path for the user (or pass
-  `--open`). Useful mid-refinement before anything is committed.
+  as the review page) and prints its file path — open that path for the user. Useful
+  mid-refinement before anything is committed.
 - `jt log` renders the push journal — every API call ever sent, with responses.
 
 ## Suggested permission setup

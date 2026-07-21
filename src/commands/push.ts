@@ -31,7 +31,7 @@ export type PushContext = ReturnType<typeof localContext> & { meta: Meta; client
 
 export async function cmdPush(argv: string[]): Promise<void> {
   const args = parseArgs(argv, {
-    boolean: ["dry-run", "await-user", "open"],
+    boolean: ["dry-run", "await-user"],
     string: ["timeout"],
   });
   const ctx = withClient(withMeta(localContext()));
@@ -42,10 +42,7 @@ export async function cmdPush(argv: string[]): Promise<void> {
   if (args["await-user"]) {
     const { runReviewFlow } = await import("../review/server.ts");
     const timeoutMs = args.timeout ? Number(args.timeout) * 1000 : 600_000;
-    const outcome = await runReviewFlow(ctx, compiled, {
-      timeoutMs,
-      openBrowser: Boolean(args.open),
-    });
+    const outcome = await runReviewFlow(ctx, compiled, { timeoutMs });
     // Exit codes for the agent loop: 0 = approved and pushed whole,
     // 2 = changes requested (notes on stdout), 1 = timeout/stale/push failure.
     if (outcome.status === "timeout" || outcome.status === "stale" || outcome.pushFailure) {

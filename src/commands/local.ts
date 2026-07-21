@@ -26,13 +26,13 @@ export function cmdStatus(argv: string[] = []): void {
 }
 
 export function cmdDiff(argv: string[]): void {
-  const args = parseArgs(argv, { boolean: ["committed", "all", "web", "open"] });
+  const args = parseArgs(argv, { boolean: ["committed", "all", "web"] });
   const ctx = localContext();
   const { store } = ctx;
   const filter = (args._ as string[]).map(String);
   const wanted = (id: string) => filter.length === 0 || filter.includes(id);
   if (args.web) {
-    diffWeb(ctx, Boolean(args.committed), Boolean(args.all), wanted, Boolean(args.open));
+    diffWeb(ctx, Boolean(args.committed), Boolean(args.all), wanted);
     return;
   }
   const sections: string[] = [];
@@ -106,7 +106,6 @@ function diffWeb(
   committedView: boolean,
   all: boolean,
   wanted: (id: string) => boolean,
-  openIt: boolean,
 ): void {
   const { store } = ctx;
   const tickets: ReviewPageModel["tickets"] = [];
@@ -166,24 +165,16 @@ function diffWeb(
   const path = join(dir, `diff-${Date.now()}.html`);
   Deno.writeTextFileSync(path, renderPage(model));
   console.log(`diff page: ${path}`);
-  if (openIt) {
-    try {
-      const cmd = Deno.build.os === "darwin" ? "open" : "xdg-open";
-      new Deno.Command(cmd, { args: [path], stdout: "null", stderr: "null" }).spawn().unref();
-    } catch {
-      // path was printed
-    }
-  }
 }
 
 export function cmdShow(argv: string[]): void {
-  const args = parseArgs(argv, { boolean: ["base", "committed", "web", "open"] });
+  const args = parseArgs(argv, { boolean: ["base", "committed", "web"] });
   const targets = (args._ as string[]).map(String);
   const ctx = localContext();
   const { store } = ctx;
 
   if (args.web) {
-    showWeb(ctx, targets, Boolean(args.base), Boolean(args.committed), Boolean(args.open));
+    showWeb(ctx, targets, Boolean(args.base), Boolean(args.committed));
     return;
   }
   const target = targets[0];
@@ -217,7 +208,6 @@ function showWeb(
   targets: string[],
   base: boolean,
   committed: boolean,
-  openIt: boolean,
 ): void {
   const { store } = ctx;
   const layer = base ? "base" : committed ? "committed" : "working";
@@ -261,14 +251,6 @@ function showWeb(
   const path = join(dir, `show-${Date.now()}.html`);
   Deno.writeTextFileSync(path, renderPage(model));
   console.log(`workspace page: ${path}`);
-  if (openIt) {
-    try {
-      const cmd = Deno.build.os === "darwin" ? "open" : "xdg-open";
-      new Deno.Command(cmd, { args: [path], stdout: "null", stderr: "null" }).spawn().unref();
-    } catch {
-      // path was printed
-    }
-  }
 }
 
 export function cmdNew(argv: string[]): void {

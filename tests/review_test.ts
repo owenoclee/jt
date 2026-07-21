@@ -29,7 +29,6 @@ async function decideViaHttp(
   let pageUrl = "";
   const flow = runReviewFlow(ctx, compiled, {
     timeoutMs: 10_000,
-    openBrowser: false,
     onServe: (url) => (pageUrl = url),
   });
   while (!pageUrl) await new Promise((r) => setTimeout(r, 5));
@@ -153,10 +152,7 @@ Deno.test("review flow: atomic gate, notes, uncommit reshaping, collapse", async
       store.writeWorking("TST-1", { ...w, labels: ["late-label"] });
       cmdCommit([]);
       const compiled = await compilePush(ctx);
-      const outcome = await runReviewFlow(ctx, compiled, {
-        timeoutMs: 100,
-        openBrowser: false,
-      });
+      const outcome = await runReviewFlow(ctx, compiled, { timeoutMs: 100 });
       assertEquals(outcome.status, "timeout");
       assertEquals(mock.issues.get("TST-1")!.labels.includes("late-label"), false);
     });

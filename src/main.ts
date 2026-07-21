@@ -40,7 +40,7 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
     jt status [--all]       working vs committed vs base, per ticket (--all lists clean)
     jt diff [ID...]         uncommitted changes (working vs committed/base)
     jt diff --committed     what push will send (committed vs base)
-    jt diff --web           render the diff as a PR-style page (prints path; --open)
+    jt diff --web           render the diff as a PR-style page (prints the file path)
     jt show ID [--base|--committed]
     jt show --web [ID...]   read-only workspace browser: rendered ticket cards
     jt log [--all]          push journal
@@ -55,11 +55,11 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
 
   push (the only remote-mutating verb)
     jt push [--dry-run]     compile committed−base → print exact API ops → execute → journal
-    jt push --await-user [--timeout SECS] [--open]
+    jt push --await-user [--timeout SECS]
                             serve the changeset as a browser review page. ONE decision:
                             Approve & push (whole changeset) or Request changes (nothing
                             sent; per-ticket notes returned). Prints the URL — agent or
-                            user opens it (--open to launch from jt itself).
+                            user opens it.
                             exit 0 pushed · 2 changes requested · 1 timeout/stale
 
   agent docs: jt schema   (ticket file JSON Schema) · see SKILL.md

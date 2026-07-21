@@ -2,7 +2,7 @@
   "tasks": {
     "jt": "deno run --allow-read --allow-write --allow-env --allow-net src/main.ts",
     "test": "deno test --allow-read --allow-write --allow-env --allow-net",
-    "check": "deno check src/main.ts && deno lint",
+    "check": "deno check src/main.ts scripts/generate_homebrew_formula.ts && deno lint",
     "install": "deno install --global --force --name jt --allow-read --allow-write --allow-env --allow-net --config deno.json src/main.ts"
   },
   "imports": {

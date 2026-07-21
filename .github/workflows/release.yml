@@ -12,30 +12,100 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           deno-version: v2.x
+      - name: Validate tag and source version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          source_version="$(deno eval 'import { VERSION } from "./src/main.ts"; console.log(VERSION)')"
+          if [[ "$tag_version" != "$source_version" ]]; then
+            echo "tag version $tag_version does not match source version $source_version" >&2
+            exit 1
+          fi
       - name: Tests
         run: deno task test
       - name: Compile multi-arch binaries
         run: |
-          mkdir -p dist
+          mkdir -p dist/raw dist/release
           for target in \
             x86_64-unknown-linux-gnu \
             aarch64-unknown-linux-gnu \
             x86_64-apple-darwin \
-            aarch64-apple-darwin \
-            x86_64-pc-windows-msvc; do
+            aarch64-apple-darwin; do
             echo "compiling $target"
             deno compile \
               --allow-read --allow-write --allow-env --allow-net \
               --target "$target" \
-              --output "dist/jt-$target" \
+              --output "dist/raw/jt-$target" \
               src/main.ts
           done
-          ls -la dist/
+          deno compile \
+            --allow-read --allow-write --allow-env --allow-net \
+            --target x86_64-pc-windows-msvc \
+            --output dist/raw/jt-x86_64-pc-windows-msvc.exe \
+            src/main.ts
+      - name: Package release archives and checksums
+        run: |
+          for target in \
+            x86_64-unknown-linux-gnu \
+            aarch64-unknown-linux-gnu \
+            x86_64-apple-darwin \
+            aarch64-apple-darwin; do
+            staging="$(mktemp -d)"
+            install -m 0755 "dist/raw/jt-$target" "$staging/jt"
+            tar -czf "dist/release/jt-$target.tar.gz" -C "$staging" jt
+            rm -rf "$staging"
+          done
+
+          staging="$(mktemp -d)"
+          install -m 0755 dist/raw/jt-x86_64-pc-windows-msvc.exe "$staging/jt.exe"
+          (cd "$staging" && zip -q "$GITHUB_WORKSPACE/dist/release/jt-x86_64-pc-windows-msvc.zip" jt.exe)
+          rm -rf "$staging"
+
+          (cd dist/release && sha256sum jt-* > SHA256SUMS)
+          cat dist/release/SHA256SUMS
+      - name: Verify packaged executables
+        run: |
+          for archive in dist/release/*.tar.gz; do
+            staging="$(mktemp -d)"
+            tar -xzf "$archive" -C "$staging"
+            test -x "$staging/jt"
+            rm -rf "$staging"
+          done
+          unzip -t dist/release/jt-x86_64-pc-windows-msvc.zip
       - name: Create release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
-          files: dist/*
+          files: dist/release/*
           generate_release_notes: true
+      - name: Check out Homebrew tap
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: owenoclee/homebrew-tap
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          path: homebrew-tap
+      - name: Update Homebrew formula
+        run: |
+          arm64_sha="$(awk '$2 == "jt-aarch64-apple-darwin.tar.gz" { print $1 }' dist/release/SHA256SUMS)"
+          x86_64_sha="$(awk '$2 == "jt-x86_64-apple-darwin.tar.gz" { print $1 }' dist/release/SHA256SUMS)"
+          deno run --allow-write=homebrew-tap/Formula scripts/generate_homebrew_formula.ts \
+            --version "${GITHUB_REF_NAME#v}" \
+            --arm64-sha256 "$arm64_sha" \
+            --x86-64-sha256 "$x86_64_sha" \
+            --output homebrew-tap/Formula/jt.rb
+          ruby -c homebrew-tap/Formula/jt.rb
+      - name: Publish Homebrew formula
+        working-directory: homebrew-tap
+        run: |
+          if git diff --quiet -- Formula/jt.rb; then
+            echo "Formula/jt.rb is already current"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/jt.rb
+          git commit -m "jt ${GITHUB_REF_NAME#v}"
+          git push

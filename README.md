@@ -9,8 +9,14 @@ mutates Jira.
 
 ## Install
 
-Download a binary from the
-[latest release](https://github.com/owenoclee/jira-cli/releases/latest), or install from
+Install with Homebrew:
+
+```sh
+brew install owenoclee/tap/jt
+```
+
+Alternatively, download an archive and its checksum from the
+[latest release](https://github.com/owenoclee/jt/releases/latest), or install from
 a checkout with Deno 2.x:
 
 ```sh

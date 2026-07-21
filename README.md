@@ -1,194 +1,146 @@
 # jt — Jira as a remote VCS
 
-A Jira Cloud CLI built for **agentic workflows with a human in the loop**. Tickets are
-local JSON files; changes flow through a git-like fetch → edit → diff → commit → push
-cycle, and the push compiles *exactly* the reviewed-and-committed state into API calls.
+`jt` is a Jira Cloud CLI for agent workflows with human approval. Tickets are local
+JSON files, and changes follow a fetch → edit → diff → commit → push cycle.
 
-## Why
-
-Agent tooling around Jira (MCP + a skill) can't ground user approval: the JSON the
-user reviews in chat and the request the agent sends are two different objects, because
-the agent re-types payloads into tool calls. Transcription is where typos and silent
-liberties live.
-
-`jt` closes that gap structurally:
-
-- **Files are the unit of intent.** The agent edits a file that *is* the ticket. It
-  never authors an API payload.
-- **Diffs are computed, not composed.** `jt diff` derives what changed from files on
-  disk with audited code — the user reviews that, like a code review.
-- **Push reads only tool-owned layers.** `jt commit` byte-copies the approved working
-  file into `.jira/committed/`; `jt push` compiles committed−base into API operations.
-  Tampering with a working file after review provably cannot change what is sent.
-- **One mutating verb.** Everything except `jt push` is local or read-only, so a
-  permission system (e.g. Claude Code's) can allowlist the whole workflow and gate
-  exactly the one command that touches Jira — with the full op list printed in its
-  output.
-- **A browser review gate.** `jt push --await-user` serves the changeset as a
-  PR-style page on localhost — full diff vs Jira, per-round commit deltas ("what did
-  the agent change since I last looked"), tickets unchanged since your last review
-  auto-collapsed — and the same process that rendered the page executes the push. The
-  gate is atomic, like a PR merge: **Approve & push** sends the whole changeset
-  exactly as rendered; **Request changes** sends nothing and returns your per-ticket
-  notes to the agent. Reshaping the batch happens in the layers (`jt uncommit`, the
-  `git restore --staged` analog), never inside the send button.
+`jt push` reads only committed snapshots, shows the exact changeset in a local browser
+review page, and sends it only after the user approves the whole batch. No other command
+mutates Jira.
 
 ## Install
 
-Grab a prebuilt binary from the
-[latest release](https://github.com/owenoclee/jira-cli/releases/latest)
-(Linux and macOS, x64 + arm64, plus Windows x64) — no runtime required:
+Download a binary from the
+[latest release](https://github.com/owenoclee/jira-cli/releases/latest), or install from
+a checkout with Deno 2.x:
 
 ```sh
-chmod +x jt-aarch64-apple-darwin           # whichever matches your platform
-mv jt-aarch64-apple-darwin /usr/local/bin/jt
-```
-
-Or from a checkout, with [Deno](https://deno.com) 2.x:
-
-```sh
-deno task install        # installs the `jt` command globally
-# or run from the repo without installing:
+deno task install
+# run without installing:
 deno task jt help
 ```
 
 ## Authentication
 
-`jt` talks to Jira Cloud with Basic auth: your Atlassian account email plus an API
-token. Create the token at
-<https://id.atlassian.com/manage-profile/security/api-tokens> ("Create API token") —
-it must belong to the same account whose email you pass to `jt init --email`.
+Create an Atlassian API token at
+<https://id.atlassian.com/manage-profile/security/api-tokens>. It must belong to the
+account passed to `jt init --email`.
 
-Give it to `jt` either way (the env var wins if both are set):
+Use an environment variable:
 
 ```sh
-export JIRA_API_TOKEN=...     # shell env — good for one-offs and CI
+export JIRA_API_TOKEN=...
 ```
 
-or write it to the credentials file — durable, `0600`, read by nothing but `jt`.
-This one-liner prompts for the token so it never lands in your shell history:
+Or create the durable credentials file without putting the token in shell history:
 
 ```sh
 sh -c 'umask 077; mkdir -p ~/.config/jira-cli; printf "token: "; IFS= read -rs t; printf "%s" "$t" > ~/.config/jira-cli/credentials; echo'
 ```
 
-Once inside a workspace, `jt config show` reports which source is active — it names
-the source, never the value.
+The environment variable takes precedence. `jt config show` reports the active source
+without printing the token.
 
 ## Quickstart
 
 ```sh
-mkdir -p ~/jira/ENG && cd ~/jira/ENG      # one durable workspace per project
+mkdir -p ~/jira/ENG && cd ~/jira/ENG
 jt init --base-url https://yoursite.atlassian.net --email you@example.com --project ENG
-jt meta sync                        # alias maps: fields, issue types, sprints, statuses...
-jt pull                             # clones the project: every ticket → tickets/ENG-*.json
+jt meta sync
+jt pull
 
-$EDITOR tickets/ENG-123.json        # edit desired state (or let your agent do it)
-jt diff                             # review the change (or: jt diff --web)
-jt commit -m "first round"          # stage it
-jt push --await-user                # approve per ticket in the browser, then it sends
-# or: jt push                       # non-interactive; prints every API op first
+$EDITOR tickets/ENG-123.json
+jt diff
+jt commit -m "update ENG-123"
+jt push
 ```
 
-The workspace is a **mirror** by default: `jt init` writes `sync.jql` (`project = ENG`)
-into the config, and every `jt pull` reconciles the whole slice — new remote tickets
-appear, edits rebase in, deletions leave. Pulls are incremental (one newest-first search
-bounded by an `updated` watermark, plus a keys-only sweep for deletions), so a morning
-pull over a 500-ticket backlog costs a handful of API calls, not 500. Narrow `sync.jql`
-to any JQL you like, or delete it to track tickets one by one with `jt fetch`.
+`jt push` prints a local review URL and waits for one decision:
 
-### What changed since I last looked?
+- **Approve & push** sends the whole changeset exactly as shown.
+- **Request changes** sends nothing and returns per-ticket notes.
 
-`jt pull` answers "make local current"; `jt changes` answers "what's new to *me*":
+Use `jt push --dry-run` to print the compiled API operations without serving a page or
+sending anything.
+
+## Workspaces
+
+`jt init` creates:
+
+```text
+tickets/                 working ticket files; edit these
+.jira/config.json        workspace configuration; edit sync.jql/customFields here
+.jira/base/              remote state from the last fetch
+.jira/committed/         snapshots staged for push
+.jira/seen/              remote state at the last acknowledgment
+.jira/meta.json          Jira names and IDs from jt meta sync
+.jira/journal/           push requests, results, and approval provenance
+```
+
+Files under `.jira/` are tool-owned except `.jira/config.json`.
+
+Workspaces mirror their project by default. `jt init` sets `sync.jql` to
+`project = KEY`; `jt pull` then adds, updates, and removes clean local copies to match
+that JQL. Edit `sync.jql` to narrow the mirror, or remove `sync` to track individual
+tickets with `jt fetch`.
+
+Remote edits to untouched fields rebase automatically. Overlapping local and remote
+edits become conflicts resolved with `jt resolve`.
+
+## Upstream changes
+
+`jt pull` updates the local mirror. `jt changes` reports what changed remotely since
+the last acknowledgment:
 
 ```sh
-jt pull                             # sync the mirror
-jt changes                          # new / changed / gone since your last ack, full diffs
-jt changes --ack                    # absorb: current remote state becomes your baseline
+jt pull
+jt changes
+jt changes --ack
 ```
 
-The baseline (`.jira/seen/`) advances only on `--ack` — pulls can run on cron all day
-without eating anyone's morning review. It's read-only bookkeeping: it never feeds
-`jt push`, so it can't change what gets sent.
+Pulling never advances the acknowledgment baseline. `jt changes --web` provides the
+same report with an Acknowledge button.
 
-Create an epic with a child story in one push:
+## Creating tickets
 
 ```sh
 jt new big-epic --type Epic --summary "Q3 platform work"
 jt new first-story --type Story --summary "First slice" --parent @big-epic
-jt diff && jt commit && jt push     # parents created first; files renamed to real keys
+jt diff
+jt commit
+jt push
 ```
 
-## Setting up an agent
+Pending tickets use `@name` references. After a successful push, `jt` replaces them
+with Jira keys and renames their files.
 
-`jt` is built to be driven by a coding agent with a human approving pushes. Three
-steps — and note who does which:
+## Scope and safety
 
-1. **Install the skill.** [SKILL.md](SKILL.md) is the agent contract and ships with
-   frontmatter, so it drops straight into a skills folder — for Claude Code:
+`jt` supports ticket creation, updates, deletion, parenting, links, labels, custom
+fields, sprint assignment, status transitions, priority, assignee, and append-only
+comments. Descriptions and comments use a deterministic Markdown/ADF subset.
 
-   ```sh
-   mkdir -p ~/.claude/skills/jt
-   curl -fsSL https://raw.githubusercontent.com/owenoclee/jira-cli/main/SKILL.md \
-     -o ~/.claude/skills/jt/SKILL.md
-   ```
+It does not manage boards, sprints, Plans, goals, users, permissions, or workflows.
 
-2. **You create the credential — not the agent.** Run the one-liner from
-   [Authentication](#authentication) in your own terminal, so the token never
-   appears in a chat transcript (SKILL.md forbids the agent from handling it).
-   After `jt init`, the agent verifies with `jt config show`, which names the
-   token's source without printing it.
+- `jt push` refuses if a staged ticket changed remotely after the last fetch.
+- `jt rm KEY` stages deletion; Jira is untouched until it is committed and approved.
+- Existing comments cannot be edited or removed.
+- Unsupported description content is marked with `descriptionLossy`.
+- Pushes are journaled with requests, outcomes, and browser approval provenance.
 
-3. **Set permissions.** Allowlist the local/read-only commands and gate the one
-   mutating verb (`jt push`) — the suggested split is at the bottom of SKILL.md.
+Run `jt schema` for the strict ticket-file JSON Schema. Unknown keys are errors.
 
-## The model
+## Agents
 
-```
-tickets/ENG-123.json        working tree — the only files you (or your agent) edit
-.jira/base/ENG-123.json     remote state as of last fetch          (tool-owned)
-.jira/committed/…           approved snapshots, byte copies        (tool-owned)
-.jira/seen/ENG-123.json     remote state as of your last ack       (tool-owned)
-.jira/sync.json             mirror watermark + scope membership    (tool-owned)
-.jira/meta.json             alias maps from `jt meta sync`         (tool-owned)
-.jira/journal/…             every push: exact requests + responses (tool-owned)
-```
+[SKILL.md](SKILL.md) is the agent contract. Install it in the agent's skills directory
+and allow local/read-only `jt` commands as appropriate. Keep `jt push` gated: it is the
+only command that mutates Jira.
 
-Three layers, git-style: `status`/`diff` compare them, `commit` promotes working →
-committed, `push` compiles committed − base, executes, and advances base by refetching.
-`pull` rebases: remote changes to fields you didn't touch flow in silently; overlapping
-edits become explicit conflicts (`jt resolve`). The seen layer is a fourth, *anchored*
-copy — it advances only when you acknowledge (`jt changes --ack`), so `jt changes` can
-always answer "what has the remote done since my last knowledge of the board."
-
-## What it covers
-
-Tickets only, by design: create / read / update / delete, epics and parenting, issue
-links ("blocks", "relates to", any link type in your instance), labels, custom fields
-(by display name), sprint assignment, status transitions (declarative: edit `status`,
-jt finds the transition), and append-only comments — all in markdown, converted
-deterministically to/from ADF.
-
-Out of scope: sprint/board management, Plans, goals, users, permissions, workflows.
-
-## Ticket file
-
-See [SKILL.md](SKILL.md) for the agent-facing contract and the full format; `jt schema`
-prints the JSON Schema (strict — unknown keys are errors, so typos fail loudly).
-
-## Safety properties
-
-- `jt push` refuses when the remote moved since your fetch (per-ticket staleness guard).
-- `jt rm` records the target's summary and stages deletion for review; nothing is
-  deleted until a committed deletion is pushed.
-- Descriptions containing ADF beyond the markdown subset are flagged lossy; untouched
-  descriptions are never rewritten (diffs compare canonical markdown, so round-tripping
-  can't produce phantom changes).
-- Every push is journaled with the exact request bodies sent and responses received.
+The user should create the credential directly; an agent should never ask for, read,
+or print the API token.
 
 ## Development
 
 ```sh
-deno task test     # unit + e2e against an in-process mock Jira
-deno task check    # typecheck + lint
+deno task check
+deno task test
 ```

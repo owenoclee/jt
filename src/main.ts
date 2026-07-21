@@ -53,7 +53,8 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
     jt commit [ID...] [-m 'note']   stage working state into the changeset
     jt uncommit ID...       unstage (keep working edits)     [git restore --staged]
     jt restore ID...        reset working file to committed/base; undoes jt rm
-    jt rm KEY               stage remote deletion   ·   jt untrack ID  drop locally
+    jt rm KEY               stage remote deletion
+    jt untrack ID...        remove all local state; Jira untouched
     jt resolve KEY          accept working file as desired state after a pull conflict
 
   push (the only remote-mutating verb — approval-only)

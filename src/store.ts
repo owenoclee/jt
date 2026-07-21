@@ -8,6 +8,8 @@
  *   .jira/deletions.json      deletion intents (jt rm)
  *   .jira/conflicts.json      unresolved pull conflicts
  *   .jira/journal/            push audit log
+ *   .jira/seen/<KEY>.json     last-acknowledged remote state (jt changes --ack)
+ *   .jira/sync.json           mirror watermark + scope membership (tool-owned)
  */
 import { basename, join } from "@std/path";
 import { serializeTicket, ticketsEqual } from "./canonical.ts";
@@ -18,6 +20,7 @@ import type {
   ConflictRecord,
   DeletionIntent,
   JournalEntry,
+  SyncState,
   Ticket,
   TicketStatus,
 } from "./types.ts";
@@ -36,8 +39,10 @@ export class Store {
   readonly committedDir: string;
   readonly journalDir: string;
   readonly ticketsDir: string;
+  readonly seenDir: string;
   readonly deletionsFile: string;
   readonly conflictsFile: string;
+  readonly syncFile: string;
 
   constructor(public root: string) {
     this.jiraDir = join(root, ".jira");
@@ -45,12 +50,14 @@ export class Store {
     this.committedDir = join(this.jiraDir, "committed");
     this.journalDir = join(this.jiraDir, "journal");
     this.ticketsDir = join(root, "tickets");
+    this.seenDir = join(this.jiraDir, "seen");
     this.deletionsFile = join(this.jiraDir, "deletions.json");
     this.conflictsFile = join(this.jiraDir, "conflicts.json");
+    this.syncFile = join(this.jiraDir, "sync.json");
   }
 
   ensureDirs(): void {
-    for (const d of [this.jiraDir, this.baseDir, this.committedDir, this.journalDir, this.ticketsDir]) {
+    for (const d of [this.jiraDir, this.baseDir, this.committedDir, this.journalDir, this.ticketsDir, this.seenDir]) {
       Deno.mkdirSync(d, { recursive: true });
     }
   }
@@ -211,6 +218,72 @@ export class Store {
     } catch {
       // already gone
     }
+  }
+
+  // ---- seen layer (last-acknowledged remote state; advances only on jt changes --ack) ----
+
+  seenPath(key: string): string {
+    return join(this.seenDir, `${key}.json`);
+  }
+
+  readSeen(key: string): { ticket: Ticket; bytes: string } | null {
+    const path = this.seenPath(key);
+    let bytes: string;
+    try {
+      bytes = Deno.readTextFileSync(path);
+    } catch {
+      return null;
+    }
+    return { ticket: parseTicket(JSON.parse(bytes), path), bytes };
+  }
+
+  listSeenKeys(): string[] {
+    try {
+      return [...Deno.readDirSync(this.seenDir)]
+        .filter((e) => e.isFile && e.name.endsWith(".json"))
+        .map((e) => e.name.replace(/\.json$/, ""))
+        .sort();
+    } catch {
+      return [];
+    }
+  }
+
+  removeSeen(key: string): void {
+    try {
+      Deno.removeSync(this.seenPath(key));
+    } catch {
+      // already gone
+    }
+  }
+
+  /** Acknowledge upstream state: seen becomes a byte-copy of every base ticket. */
+  ackSeen(keys?: string[]): void {
+    Deno.mkdirSync(this.seenDir, { recursive: true });
+    const wanted = keys ? new Set(keys) : null;
+    for (const key of this.listBaseKeys()) {
+      if (wanted && !wanted.has(key)) continue;
+      Deno.writeTextFileSync(this.seenPath(key), serializeTicket(this.readBase(key)!.ticket));
+    }
+    const baseKeys = new Set(this.listBaseKeys());
+    for (const key of this.listSeenKeys()) {
+      if (baseKeys.has(key)) continue;
+      if (wanted && !wanted.has(key)) continue;
+      this.removeSeen(key);
+    }
+  }
+
+  // ---- mirror sync state ----
+
+  readSyncState(): SyncState {
+    try {
+      return JSON.parse(Deno.readTextFileSync(this.syncFile)) as SyncState;
+    } catch {
+      return { watermark: null, scopeKeys: [] };
+    }
+  }
+
+  writeSyncState(state: SyncState): void {
+    Deno.writeTextFileSync(this.syncFile, JSON.stringify(state, null, 2) + "\n");
   }
 
   // ---- deletions / conflicts ----

@@ -39,12 +39,19 @@ export function cmdInit(argv: string[]): void {
     ...(args.board ? { boardId: Number(args.board) } : {}),
     trackedFields: DEFAULT_TRACKED_FIELDS,
     customFields: [],
+    sync: { jql: `project = ${project!.toUpperCase()}` },
   };
   Deno.writeTextFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
   console.log(`initialized jt workspace at ${root}`);
   console.log(`  config: ${configPath}`);
   console.log(`  next:   jt meta sync   (build the alias maps)`);
-  console.log(`          jt fetch <KEY...> | jt fetch --jql '...'`);
+  console.log(`          jt pull        (clone the project into tickets/)`);
+  console.log(
+    `  note:   the workspace mirrors sync.jql from the config — narrow it, or delete the`,
+  );
+  console.log(
+    `          sync key to track tickets one by one (jt fetch <KEY...> | --jql '...')`,
+  );
   console.log(
     `  note:   add custom field aliases (e.g. "Story Points") to customFields in the config`,
   );

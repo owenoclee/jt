@@ -3,11 +3,36 @@ import { parseArgs } from "@std/cli";
 import { appendChainEntry, type ChainSnapshot, pruneChain } from "../chain.ts";
 import { localContext, withClient, withMeta } from "../context.ts";
 import { fail } from "../errors.ts";
-import { JiraApiError } from "../jira/client.ts";
+import { JiraApiError, type JiraClient } from "../jira/client.ts";
 import { dim, green, red, yellow } from "../render/colors.ts";
-import { fetchBaseEntry, integrateFetched } from "../sync.ts";
+import {
+  commentsTruncated,
+  fetchBaseEntry,
+  fetchFieldList,
+  integrateFetched,
+  issueToBaseEntry,
+} from "../sync.ts";
 import { ticketsEqual } from "../canonical.ts";
 import type { Store } from "../store.ts";
+import type { Meta } from "../types.ts";
+
+type PullCtx = ReturnType<typeof localContext> & { meta: Meta; client: JiraClient };
+
+/**
+ * Concurrent edits during pagination can reorder issues across pages and hide one from
+ * every page we see; re-covering this window on the next pull catches them. Re-integration
+ * is idempotent and unchanged issues are skipped by their `updated` stamp, so overlap is
+ * nearly free.
+ */
+const WATERMARK_OVERLAP_MS = 5 * 60 * 1000;
+
+interface PullCounts {
+  new: number;
+  updated: number;
+  unchanged: number;
+  conflicts: number;
+  removed: number;
+}
 
 /**
  * Integrate a fetched entry and record any committed-layer rewrite in the chain as a
@@ -69,31 +94,186 @@ export async function cmdFetch(argv: string[]): Promise<void> {
   recordRebases(ctx.store, rebases);
 }
 
-export async function cmdPull(): Promise<void> {
+export async function cmdPull(argv: string[] = []): Promise<void> {
+  const args = parseArgs(argv, { boolean: ["full"] });
   const ctx = withClient(withMeta(localContext()));
-  const deletions = ctx.store.readDeletions();
-  const keys = [...new Set([...ctx.store.listBaseKeys(), ...deletions.map((d) => d.key)])];
-  if (keys.length === 0) {
+  const { store } = ctx;
+  const syncJql = ctx.ws.config.sync?.jql;
+  const prevState = store.readSyncState();
+  const firstSync = prevState.watermark === null;
+  const prevScope = new Set(prevState.scopeKeys);
+
+  const rebases: Parameters<typeof recordRebases>[1] = [];
+  const counts: PullCounts = { new: 0, updated: 0, unchanged: 0, conflicts: 0, removed: 0 };
+  const integrated = new Set<string>();
+  let scope = new Set<string>();
+
+  if (syncJql) {
+    if (/\border\s+by\b/i.test(syncJql)) {
+      fail("sync.jql must not contain ORDER BY — jt pull adds its own ordering");
+    }
+    scope = new Set(
+      await pullScope(ctx, syncJql, Boolean(args.full), !firstSync, rebases, counts, integrated),
+    );
+  }
+
+  // Everything tracked but outside the scope: ad-hoc keys, deletion intents, departures.
+  const rest = [...new Set([...store.listBaseKeys(), ...store.readDeletions().map((d) => d.key)])]
+    .filter((k) => !scope.has(k) && !integrated.has(k));
+  if (!syncJql && rest.length === 0) {
     console.log("nothing tracked — run: jt fetch <KEY...>");
     return;
   }
-  const rebases: Parameters<typeof recordRebases>[1] = [];
-  for (const key of keys) {
+  for (const key of rest) {
     try {
       const entry = await fetchBaseEntry(ctx.client, ctx.meta, ctx.ws.config, key);
-      report(key, integrateWithChain(ctx.store, entry, rebases));
+      if (syncJql && prevScope.has(key)) {
+        handleLeftScope(store, key, entry, rebases, counts);
+      } else {
+        report(key, integrateWithChain(store, entry, rebases));
+      }
     } catch (e) {
       if (e instanceof JiraApiError && e.status === 404) {
-        handleRemoteDeleted(ctx.store, key);
+        handleRemoteDeleted(store, key);
+        counts.removed++;
       } else {
         throw e;
       }
     }
   }
-  recordRebases(ctx.store, rebases);
+  recordRebases(store, rebases);
+
+  if (syncJql) {
+    if (firstSync) {
+      store.ackSeen();
+      console.log(`cloned: ${scope.size} tickets → tickets/`);
+      console.log(dim("  baseline recorded — jt changes will report upstream edits from here on"));
+      return;
+    }
+    const parts = [`${scope.size} in scope`];
+    if (counts.new) parts.push(green(`${counts.new} new`));
+    if (counts.updated) parts.push(yellow(`${counts.updated} updated`));
+    if (counts.removed) parts.push(red(`${counts.removed} removed`));
+    if (counts.conflicts) parts.push(red(`${counts.conflicts} in conflict`));
+    parts.push(dim(`${counts.unchanged} unchanged`));
+    console.log(`pull: ${parts.join(" · ")}`);
+    if (counts.new || counts.updated || counts.removed) {
+      console.log(dim("  jt changes — review upstream edits since your last ack"));
+    }
+  }
 }
 
-function handleRemoteDeleted(store: ReturnType<typeof localContext>["store"], key: string): void {
+/**
+ * Mirror the sync scope: one newest-first full-field search pages until it drops below
+ * the watermark (or the scope is exhausted), each hit feeding the normal 3-way
+ * integration. Scope membership comes from the same paging when it ran to the end,
+ * else from a keys-only sweep.
+ */
+async function pullScope(
+  ctx: PullCtx,
+  jql: string,
+  full: boolean,
+  verbose: boolean,
+  rebases: Parameters<typeof recordRebases>[1],
+  counts: PullCounts,
+  integrated: Set<string>,
+): Promise<string[]> {
+  const { store, client, meta } = ctx;
+  const config = ctx.ws.config;
+  const stored = full ? null : store.readSyncState().watermark;
+  const cutoff = stored === null || Number.isNaN(Date.parse(stored)) ? null : Date.parse(stored);
+  const fields = fetchFieldList(meta, config);
+
+  let maxUpdatedMs = cutoff ?? 0;
+  let maxUpdatedIso: string | null = cutoff === null ? null : stored;
+  let token: string | undefined;
+  let sawOlder = false;
+  let complete = false;
+  const paged: string[] = [];
+
+  while (true) {
+    const page = await searchPage(client, `${jql} ORDER BY updated DESC`, fields, token);
+    const issues = page.issues ?? [];
+    for (const issue of issues) {
+      const key = issue.key as string;
+      paged.push(key);
+      const upd: string = issue.fields?.updated ?? "";
+      const updMs = Date.parse(upd);
+      if (!Number.isNaN(updMs) && updMs > maxUpdatedMs) {
+        maxUpdatedMs = updMs;
+        maxUpdatedIso = upd;
+      }
+      if (cutoff !== null && !Number.isNaN(updMs) && updMs < cutoff) {
+        sawOlder = true; // ordered newest-first: nothing below the watermark has news
+        continue;
+      }
+      const old = store.readBase(key);
+      if (!full && old && old.updated === upd) {
+        counts.unchanged++;
+        integrated.add(key);
+        continue;
+      }
+      const entry = commentsTruncated(issue)
+        ? await fetchBaseEntry(client, meta, config, key)
+        : issueToBaseEntry(issue, meta, config);
+      reportScope(key, integrateWithChain(store, entry, rebases), counts, verbose);
+      integrated.add(key);
+    }
+    if (!page.nextPageToken || issues.length === 0) {
+      complete = true;
+      break;
+    }
+    if (sawOlder) break; // deeper pages are older still
+    token = page.nextPageToken;
+  }
+
+  const scopeKeys = complete ? [...new Set(paged)] : await searchKeys(client, jql, Infinity);
+
+  // Stragglers: in scope but unknown locally and not integrated above (e.g. moved into
+  // scope without an `updated` bump). Rare — fetched individually.
+  for (const key of scopeKeys) {
+    if (integrated.has(key) || store.readBase(key)) continue;
+    const entry = await fetchBaseEntry(client, meta, config, key);
+    reportScope(key, integrateWithChain(store, entry, rebases), counts, verbose);
+    integrated.add(key);
+  }
+
+  let watermark: string | null = null;
+  if (maxUpdatedIso !== null) {
+    const overlapped = maxUpdatedMs - WATERMARK_OVERLAP_MS;
+    watermark = new Date(cutoff === null ? overlapped : Math.max(overlapped, cutoff)).toISOString();
+  }
+  store.writeSyncState({ watermark, scopeKeys: [...scopeKeys].sort() });
+  return scopeKeys;
+}
+
+/** A previously scoped ticket still exists remotely but no longer matches sync.jql. */
+function handleLeftScope(
+  store: Store,
+  key: string,
+  entry: Parameters<typeof integrateFetched>[1],
+  rebases: Parameters<typeof recordRebases>[1],
+  counts: PullCounts,
+): void {
+  const base = store.readBase(key);
+  const working = store.readWorking(key);
+  const clean = base && working && ticketsEqual(working.ticket, base.ticket) &&
+    !store.listCommittedIds().includes(key) &&
+    !store.readDeletions().some((d) => d.key === key);
+  if (clean) {
+    store.removeWorking(key);
+    store.removeBase(key);
+    counts.removed++;
+    console.log(`  ${key} ${yellow("left the board — removed local copy")}`);
+    return;
+  }
+  report(key, integrateWithChain(store, entry, rebases));
+  console.log(
+    `  ${key} ${yellow("left the board but has local changes — still tracked (jt untrack to drop)")}`,
+  );
+}
+
+function handleRemoteDeleted(store: Store, key: string): void {
   const intent = store.readDeletions().find((d) => d.key === key);
   if (intent) {
     store.writeDeletions(store.readDeletions().filter((d) => d.key !== key));
@@ -142,20 +322,62 @@ function report(key: string, result: ReturnType<typeof integrateFetched>): void 
   }
 }
 
-async function searchKeys(client: any, jql: string, limit: number): Promise<string[]> {
+/** Like report(), but summary-oriented: at mirror scale only events that need eyes get a line. */
+function reportScope(
+  key: string,
+  result: ReturnType<typeof integrateFetched>,
+  counts: PullCounts,
+  verbose: boolean,
+): void {
+  switch (result.kind) {
+    case "created":
+      counts.new++;
+      if (verbose) console.log(`  ${key} ${green("new")} → tickets/${key}.json`);
+      break;
+    case "refreshed":
+      counts.updated++;
+      break;
+    case "rebased":
+      counts.updated++;
+      console.log(
+        `  ${key} ${yellow("rebased")} — remote changed: ${result.fields.join(", ") || "(comments)"}`,
+      );
+      break;
+    case "kept":
+      counts.updated++;
+      console.log(`  ${key} ${dim("base updated; working file left as-is")}`);
+      break;
+    case "conflict":
+      counts.conflicts++;
+      console.log(
+        `  ${key} ${red("CONFLICT")} on ${result.fields.join(", ")} — ` +
+          `edit the working file to the desired final state, then: jt resolve ${key}`,
+      );
+      break;
+  }
+}
+
+async function searchPage(
+  client: JiraClient,
+  jql: string,
+  fields: string[],
+  nextPageToken?: string,
+  maxResults = 100,
+): Promise<{ issues: any[]; nextPageToken?: string }> {
+  const body: Record<string, unknown> = { jql, maxResults, fields };
+  if (nextPageToken) body.nextPageToken = nextPageToken;
+  return (await client.post("/rest/api/3/search/jql", body)) as any;
+}
+
+async function searchKeys(client: JiraClient, jql: string, limit: number): Promise<string[]> {
   const keys: string[] = [];
-  let nextPageToken: string | undefined;
+  let token: string | undefined;
   while (keys.length < limit) {
-    const body: Record<string, unknown> = {
-      jql,
-      maxResults: Math.min(100, limit - keys.length),
-      fields: ["key"],
-    };
-    if (nextPageToken) body.nextPageToken = nextPageToken;
-    const page = (await client.post("/rest/api/3/search/jql", body)) as any;
-    for (const issue of page.issues ?? []) keys.push(issue.key);
-    nextPageToken = page.nextPageToken;
-    if (!nextPageToken || (page.issues ?? []).length === 0) break;
+    const page = await searchPage(client, jql, ["key"], token, Math.min(100, limit - keys.length));
+    const issues = page.issues ?? [];
+    for (const issue of issues) keys.push(issue.key);
+    token = page.nextPageToken;
+    if (!token || issues.length === 0) break;
   }
   return keys;
 }

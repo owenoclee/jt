@@ -1,5 +1,6 @@
 import { cmdConfigShow, cmdInit } from "./commands/init.ts";
 import { cmdMeta } from "./commands/meta.ts";
+import { cmdChanges } from "./commands/changes.ts";
 import { cmdFetch, cmdPull } from "./commands/fetch.ts";
 import { cmdCommit } from "./commands/commit.ts";
 import { cmdPush } from "./commands/push.ts";
@@ -20,7 +21,7 @@ import { UserError } from "./errors.ts";
 import { JiraApiError } from "./jira/client.ts";
 import { bold, red } from "./render/colors.ts";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
 
 const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit → diff → commit → push)
 
@@ -31,9 +32,12 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
     jt meta show            render the alias maps
 
   read (local-safe)
-    jt fetch KEY... | --jql '...' [--limit N]
-    jt pull                 refresh all tracked tickets; 3-way rebase, conflicts flagged
-    jt status               working vs committed vs base, per ticket
+    jt pull [--full]        sync the mirror (sync.jql in config): new, changed and deleted
+                            tickets flow in; 3-way rebase, conflicts flagged
+    jt changes [KEY...]     upstream edits since your last ack: new / changed / gone
+    jt changes --ack        absorb them — records current remote state as seen
+    jt fetch KEY... | --jql '...' [--limit N]   track tickets one by one
+    jt status [--all]       working vs committed vs base, per ticket (--all lists clean)
     jt diff [ID...]         uncommitted changes (working vs committed/base)
     jt diff --committed     what push will send (committed vs base)
     jt diff --web           render the diff as a PR-style page (prints path; --open)
@@ -74,9 +78,11 @@ async function main(): Promise<void> {
     case "fetch":
       return await cmdFetch(rest);
     case "pull":
-      return await cmdPull();
+      return await cmdPull(rest);
+    case "changes":
+      return cmdChanges(rest);
     case "status":
-      return cmdStatus();
+      return cmdStatus(rest);
     case "diff":
       return cmdDiff(rest);
     case "show":

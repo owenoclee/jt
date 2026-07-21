@@ -19,6 +19,34 @@ work, or a durable directory (e.g. `~/jira/<project>/`) when ticket state should
 persist across sessions. One workspace per Jira project is the normal shape; check
 for an existing one before initializing a new one.
 
+**Workspaces mirror the project by default.** `jt init` writes `sync.jql`
+(`project = KEY`) into the config; `jt pull` then keeps the workspace equal to that
+JQL slice — the first pull clones every matching ticket into `tickets/`, later pulls
+incrementally bring in new tickets, rebase remote edits, and drop remote deletions
+(cheap: a watermark-bounded search, not one call per ticket). Narrow `sync.jql` for
+big projects (e.g. `project = KEY AND status != Done`), or delete the `sync` key to
+track tickets one by one with `jt fetch`.
+
+## Upstream awareness: jt changes
+
+`jt pull` makes local state current; `jt changes` reports what the remote did since
+the last acknowledgment — new tickets, per-field diffs of changed ones, and tickets
+gone (deleted or moved off the board). The baseline advances ONLY on
+`jt changes --ack`, never on pull, so pulling is always safe and never destroys the
+user's pending review.
+
+The session-start routine for a mirror workspace:
+
+```
+jt pull            # sync
+jt changes         # what happened upstream since last ack — read it, surface it
+jt status          # local state: parked edits, conflicts
+```
+
+Surface `jt changes` output to the user when it's non-empty (it is their morning
+briefing), and run `jt changes --ack` only after the news has actually been seen or
+acted on — acking is a statement that the board's current state is known.
+
 ## The workflow contract
 
 ```
@@ -149,6 +177,6 @@ parents before children, then renames the files to their real keys.
 
 ## Suggested permission setup
 
-Allowlist: `jt fetch`, `jt pull`, `jt status`, `jt diff`, `jt show`, `jt commit`,
-`jt new`, `jt meta`, `jt log`, `jt schema`, `jt config show`.
+Allowlist: `jt fetch`, `jt pull`, `jt changes`, `jt status`, `jt diff`, `jt show`,
+`jt commit`, `jt new`, `jt meta`, `jt log`, `jt schema`, `jt config show`.
 Always prompt: `jt push`, `jt rm`, `jt untrack`, `jt resolve`, `jt init`.

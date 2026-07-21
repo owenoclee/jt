@@ -50,14 +50,35 @@ mkdir my-jira-workspace && cd my-jira-workspace
 export JIRA_API_TOKEN=...           # or ~/.config/jira-cli/credentials (0600)
 jt init --base-url https://yoursite.atlassian.net --email you@example.com --project ENG
 jt meta sync                        # alias maps: fields, issue types, sprints, statuses...
+jt pull                             # clones the project: every ticket → tickets/ENG-*.json
 
-jt fetch ENG-123                    # materializes tickets/ENG-123.json
 $EDITOR tickets/ENG-123.json        # edit desired state (or let your agent do it)
 jt diff                             # review the change (or: jt diff --web)
 jt commit -m "first round"          # stage it
 jt push --await-user                # approve per ticket in the browser, then it sends
 # or: jt push                       # non-interactive; prints every API op first
 ```
+
+The workspace is a **mirror** by default: `jt init` writes `sync.jql` (`project = ENG`)
+into the config, and every `jt pull` reconciles the whole slice — new remote tickets
+appear, edits rebase in, deletions leave. Pulls are incremental (one newest-first search
+bounded by an `updated` watermark, plus a keys-only sweep for deletions), so a morning
+pull over a 500-ticket backlog costs a handful of API calls, not 500. Narrow `sync.jql`
+to any JQL you like, or delete it to track tickets one by one with `jt fetch`.
+
+### What changed since I last looked?
+
+`jt pull` answers "make local current"; `jt changes` answers "what's new to *me*":
+
+```sh
+jt pull                             # sync the mirror
+jt changes                          # new / changed / gone since your last ack, full diffs
+jt changes --ack                    # absorb: current remote state becomes your baseline
+```
+
+The baseline (`.jira/seen/`) advances only on `--ack` — pulls can run on cron all day
+without eating anyone's morning review. It's read-only bookkeeping: it never feeds
+`jt push`, so it can't change what gets sent.
 
 Create an epic with a child story in one push:
 
@@ -73,6 +94,8 @@ jt diff && jt commit && jt push     # parents created first; files renamed to re
 tickets/ENG-123.json        working tree — the only files you (or your agent) edit
 .jira/base/ENG-123.json     remote state as of last fetch          (tool-owned)
 .jira/committed/…           approved snapshots, byte copies        (tool-owned)
+.jira/seen/ENG-123.json     remote state as of your last ack       (tool-owned)
+.jira/sync.json             mirror watermark + scope membership    (tool-owned)
 .jira/meta.json             alias maps from `jt meta sync`         (tool-owned)
 .jira/journal/…             every push: exact requests + responses (tool-owned)
 ```
@@ -80,7 +103,9 @@ tickets/ENG-123.json        working tree — the only files you (or your agent) 
 Three layers, git-style: `status`/`diff` compare them, `commit` promotes working →
 committed, `push` compiles committed − base, executes, and advances base by refetching.
 `pull` rebases: remote changes to fields you didn't touch flow in silently; overlapping
-edits become explicit conflicts (`jt resolve`).
+edits become explicit conflicts (`jt resolve`). The seen layer is a fourth, *anchored*
+copy — it advances only when you acknowledge (`jt changes --ack`), so `jt changes` can
+always answer "what has the remote done since my last knowledge of the board."
 
 ## What it covers
 

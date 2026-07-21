@@ -42,6 +42,7 @@ export const ConfigSchema = z.strictObject({
   boardId: z.number().int().optional(),
   trackedFields: z.array(z.string()),
   customFields: z.array(z.string()),
+  sync: z.strictObject({ jql: z.string().min(1) }).optional(),
 });
 
 export function parseTicket(data: unknown, source: string): Ticket {

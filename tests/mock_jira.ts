@@ -37,6 +37,8 @@ export class MockJira {
   issues = new Map<string, MockIssue>();
   links = new Map<string, { id: string; typeName: string; inwardKey: string; outwardKey: string }>();
   requestLog: { method: string; path: string; body?: any }[] = [];
+  /** When set, search results inline at most this many comments per issue (total stays honest). */
+  searchCommentCap: number | null = null;
   #issueCounter = 1;
   #idCounter = 1000;
   #clock = 0;
@@ -139,7 +141,23 @@ export class MockJira {
       return json([{ accountId: "acc-1", emailAddress: "t@example.com" }]);
     }
     if (path === "/rest/api/3/search/jql" && req.method === "POST") {
-      return json({ issues: [...this.issues.keys()].map((key) => ({ key })) });
+      const jql: string = body?.jql ?? "";
+      let list = [...this.issues.values()];
+      const proj = jql.match(/project\s*=\s*([A-Z][A-Z0-9_]*)/);
+      if (proj) list = list.filter((i) => i.project === proj[1]);
+      if (/order by updated desc/i.test(jql)) {
+        list.sort((a, b) => b.updated.localeCompare(a.updated));
+      } else {
+        list.sort((a, b) => a.key.localeCompare(b.key));
+      }
+      const max = Math.min(Number(body?.maxResults ?? 50), 100);
+      const start = Number(body?.nextPageToken ?? 0);
+      const pageIssues = list.slice(start, start + max);
+      const fields: string[] = body?.fields ?? ["key"];
+      const keyOnly = fields.length === 1 && (fields[0] === "key" || fields[0] === "id");
+      const issues = pageIssues.map((i) => keyOnly ? { key: i.key } : this.#render(i, true));
+      const next = start + max < list.length ? { nextPageToken: String(start + max) } : {};
+      return json({ issues, ...next });
     }
 
     // ---- issue CRUD ----
@@ -250,7 +268,7 @@ export class MockJira {
     issue.updated = this.#tick();
   }
 
-  #render(issue: MockIssue): any {
+  #render(issue: MockIssue, forSearch = false): any {
     const issuelinks: any[] = [];
     for (const l of this.links.values()) {
       const type = {
@@ -278,7 +296,12 @@ export class MockJira {
         updated: issue.updated,
         issuetype: { name: issue.issuetype },
         project: { key: issue.project },
-        comment: { comments: issue.comments, total: issue.comments.length },
+        comment: {
+          comments: forSearch && this.searchCommentCap !== null
+            ? issue.comments.slice(0, this.searchCommentCap)
+            : issue.comments,
+          total: issue.comments.length,
+        },
         issuelinks,
         customfield_10020: issue.sprintId === null
           ? null

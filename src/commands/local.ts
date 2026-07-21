@@ -8,15 +8,21 @@ import { buildCommitViews, buildSinceReview } from "../review/model.ts";
 import { localContext, withClient, withMeta } from "../context.ts";
 import { diffTickets } from "../diff.ts";
 import { fail } from "../errors.ts";
-import { bold, cyan, dim, green, red } from "../render/colors.ts";
+import { bold, cyan, dim, green, red, yellow } from "../render/colors.ts";
+import { upstreamChangeCount } from "./changes.ts";
 import { renderDiffEntries, renderJournalEntry, renderStatus, renderTicket } from "../render/render.ts";
 import { ticketJsonSchema } from "../schema.ts";
 import { fetchBaseEntry } from "../sync.ts";
 import type { Ticket } from "../types.ts";
 
-export function cmdStatus(): void {
+export function cmdStatus(argv: string[] = []): void {
+  const args = parseArgs(argv, { boolean: ["all"] });
   const { store } = localContext();
-  console.log(renderStatus(store.status()));
+  console.log(renderStatus(store.status(), { all: Boolean(args.all) }));
+  const upstream = upstreamChangeCount(store);
+  if (upstream > 0) {
+    console.log(yellow(`  ↓ ${upstream} upstream change${upstream === 1 ? "" : "s"} since your last ack — jt changes`));
+  }
 }
 
 export function cmdDiff(argv: string[]): void {
@@ -386,6 +392,7 @@ export function cmdUntrack(argv: string[]): void {
     store.removeCommitted(id);
     if (!id.startsWith("@")) {
       store.removeBase(id);
+      store.removeSeen(id);
       store.writeDeletions(store.readDeletions().filter((d) => d.key !== id));
       store.writeConflicts(store.readConflicts().filter((c) => c.key !== id));
     }

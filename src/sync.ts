@@ -32,20 +32,33 @@ const BUILTIN_FETCH_FIELDS = [
   "issuelinks",
 ];
 
+/** Every field a fetch needs, resolved for this workspace's config. */
+export function fetchFieldList(meta: Meta, config: Config): string[] {
+  const customIds = config.customFields.map((alias) => resolveFieldAlias(meta, alias));
+  return [
+    ...BUILTIN_FETCH_FIELDS,
+    ...(meta.sprintFieldId ? [meta.sprintFieldId] : []),
+    ...customIds.map((f) => f.id),
+  ];
+}
+
+/**
+ * Search results may cap the embedded comment list; an issue payload where the comment
+ * total exceeds what's inlined must be refetched individually before integrating.
+ */
+export function commentsTruncated(issue: any): boolean {
+  const c = issue?.fields?.comment;
+  return Boolean(c && typeof c.total === "number" && c.total > (c.comments?.length ?? 0));
+}
+
 export async function fetchBaseEntry(
   client: JiraClient,
   meta: Meta,
   config: Config,
   key: string,
 ): Promise<BaseEntry> {
-  const customIds = config.customFields.map((alias) => resolveFieldAlias(meta, alias));
-  const fieldList = [
-    ...BUILTIN_FETCH_FIELDS,
-    ...(meta.sprintFieldId ? [meta.sprintFieldId] : []),
-    ...customIds.map((f) => f.id),
-  ];
   const issue = (await client.get(`/rest/api/3/issue/${key}`, {
-    fields: fieldList.join(","),
+    fields: fetchFieldList(meta, config).join(","),
   })) as any;
   return issueToBaseEntry(issue, meta, config);
 }

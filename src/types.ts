@@ -72,6 +72,20 @@ export interface Config {
   trackedFields: string[];
   /** Custom field aliases tracked in the `fields` object. */
   customFields: string[];
+  /** Mirror declaration: `jt pull` keeps the workspace equal to this JQL slice of Jira. */
+  sync?: { jql: string };
+}
+
+/** Mirror observation state (.jira/sync.json) — tool-owned, never edited by hand. */
+export interface SyncState {
+  /**
+   * High-water `updated` mark (server clock, minus a safety overlap) from the last
+   * completed scope pull; null before the first sync. Incremental pulls page the scope
+   * newest-first and stop below this mark.
+   */
+  watermark: string | null;
+  /** Keys that matched the sync JQL at the last completed pull — mirror membership. */
+  scopeKeys: string[];
 }
 
 export interface MetaField {

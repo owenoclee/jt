@@ -4,15 +4,19 @@ import type { DiffEntry } from "../diff.ts";
 import { lineDiff } from "../diff.ts";
 import type { JournalEntry, Ticket, TicketStatus } from "../types.ts";
 
-export function renderStatus(statuses: TicketStatus[]): string {
-  if (statuses.length === 0) return "no tracked tickets — run: jt fetch <KEY...> or jt new";
+export function renderStatus(statuses: TicketStatus[], opts: { all?: boolean } = {}): string {
+  if (statuses.length === 0) return "no tracked tickets — run: jt pull, jt fetch <KEY...> or jt new";
+  const shown = opts.all ? statuses : statuses.filter((s) => s.state !== "clean");
   const lines: string[] = [];
-  const width = Math.max(...statuses.map((s) => s.id.length));
-  for (const s of statuses) {
-    const badge = stateBadge(s.state);
-    const id = s.id.padEnd(width);
-    const detail = s.detail ? `  ${dim(`(${s.detail})`)}` : "";
-    lines.push(`  ${badge}  ${bold(id)}  ${s.summary}${detail}`);
+  if (shown.length > 0) {
+    const width = Math.max(...shown.map((s) => s.id.length));
+    for (const s of shown) {
+      const badge = stateBadge(s.state);
+      const id = s.id.padEnd(width);
+      const detail = s.detail ? `  ${dim(`(${s.detail})`)}` : "";
+      lines.push(`  ${badge}  ${bold(id)}  ${s.summary}${detail}`);
+    }
+    lines.push("");
   }
   const pushable = statuses.filter((s) =>
     ["committed", "new+committed", "deleted+committed"].includes(s.state)
@@ -20,10 +24,11 @@ export function renderStatus(statuses: TicketStatus[]): string {
   const dirty = statuses.filter((s) =>
     ["modified", "new", "deleted", "committed+modified", "new+committed+modified"].includes(s.state)
   ).length;
-  lines.push("");
+  const hidden = statuses.length - shown.length;
   lines.push(
     dim(
-      `${statuses.length} tracked · ${dirty} with uncommitted changes · ${pushable} ready to push`,
+      `${statuses.length} tracked · ${dirty} with uncommitted changes · ${pushable} ready to push` +
+        (hidden > 0 ? ` · ${hidden} clean (jt status --all to list)` : ""),
     ),
   );
   return lines.join("\n");

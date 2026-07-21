@@ -126,7 +126,7 @@ export function cmdChanges(argv: string[], webOpts: ChangesWebOptions = {}): voi
     console.log(
       dim(
         `${added} new · ${changed} changed · ${gone} gone since your last ack` +
-          (args.ack ? "" : " — jt changes --ack when absorbed"),
+          (args.ack ? "" : " — jt changes --web to show the user · --ack when absorbed"),
       ),
     );
   }

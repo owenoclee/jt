@@ -37,7 +37,7 @@ export async function cmdPush(
   reviewOpts: Partial<ReviewOptions> = {},
 ): Promise<void> {
   const args = parseArgs(argv, {
-    boolean: ["dry-run", "await-user"],
+    boolean: ["dry-run"],
     string: ["timeout"],
   });
   const ctx = withClient(withMeta(localContext()));
@@ -50,10 +50,6 @@ export async function cmdPush(
     console.log(`\n${cyan("dry-run")} — nothing sent`);
     return;
   }
-  if (args["await-user"]) {
-    console.log(dim("note: --await-user is now the default — every push goes through the review page"));
-  }
-
   const { runReviewFlow } = await import("../review/server.ts");
   const timeoutMs = args.timeout ? Number(args.timeout) * 1000 : 600_000;
   const outcome = await runReviewFlow(ctx, compiled, { timeoutMs, ...reviewOpts });

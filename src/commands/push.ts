@@ -1,12 +1,11 @@
 /**
- * jt push: the single remote-mutating verb.
+ * jt push: the single remote-mutating verb — and it is approval-only.
  *
- * Compiles committed−base into exact API ops (never reading the working tree), prints
- * them, checks remote staleness, executes in order, journals everything, then advances
- * the base layer by refetching what changed.
- *
- * --await-user hands the approval decision to a browser page served from the same
- * process (see src/review/server.ts); only user-approved tickets execute.
+ * Compiles committed−base into exact API ops (never reading the working tree), checks
+ * remote staleness, then hands the changeset to the browser review page served from
+ * this same process (see src/review/server.ts). A human decision there is the only
+ * thing that executes; no headless mutation path exists. --dry-run prints the
+ * compiled plan and stops. Executed ops are journaled with approval provenance.
  */
 // deno-lint-ignore-file no-explicit-any
 import { parseArgs } from "@std/cli";
@@ -19,6 +18,8 @@ import { fail } from "../errors.ts";
 import { JiraApiError, type JiraClient } from "../jira/client.ts";
 import { searchPage } from "../jira/search.ts";
 import { bold, cyan, dim, green, red, yellow } from "../render/colors.ts";
+// Type-only: the runtime import of the review server stays dynamic (it imports us back).
+import type { ReviewOptions } from "../review/server.ts";
 import { fetchBaseEntry, integrateFetched } from "../sync.ts";
 import type {
   BaseEntry,
@@ -31,7 +32,10 @@ import type {
 
 export type PushContext = ReturnType<typeof localContext> & { meta: Meta; client: JiraClient };
 
-export async function cmdPush(argv: string[]): Promise<void> {
+export async function cmdPush(
+  argv: string[],
+  reviewOpts: Partial<ReviewOptions> = {},
+): Promise<void> {
   const args = parseArgs(argv, {
     boolean: ["dry-run", "await-user"],
     string: ["timeout"],
@@ -41,46 +45,24 @@ export async function cmdPush(argv: string[]): Promise<void> {
   const compiled = await compilePush(ctx);
   await checkStaleness(ctx, compiled.existingKeys);
 
-  if (args["await-user"]) {
-    const { runReviewFlow } = await import("../review/server.ts");
-    const timeoutMs = args.timeout ? Number(args.timeout) * 1000 : 600_000;
-    const outcome = await runReviewFlow(ctx, compiled, { timeoutMs });
-    // Exit codes for the agent loop: 0 = approved and pushed whole,
-    // 2 = changes requested (notes on stdout), 1 = timeout/stale/push failure.
-    if (outcome.status === "timeout" || outcome.status === "stale" || outcome.pushFailure) {
-      Deno.exit(1);
-    }
-    if (outcome.status === "changes-requested") Deno.exit(2);
-    return;
-  }
-
-  printPlan(compiled.ops, compiled.warnings);
   if (args["dry-run"]) {
+    printPlan(compiled.ops, compiled.warnings);
     console.log(`\n${cyan("dry-run")} — nothing sent`);
     return;
   }
+  if (args["await-user"]) {
+    console.log(dim("note: --await-user is now the default — every push goes through the review page"));
+  }
 
-  console.log("");
-  const result = await executePush(ctx, compiled.ops);
-  console.log("");
-  if (result.failure) {
-    console.log(
-      red(`push incomplete — ${result.okCount}/${compiled.ops.length} ops applied`),
-    );
-    console.log(dim(`journal: ${result.journalPath}`));
-    console.log(dim("local state was re-synced to what actually applied; fix and push again"));
+  const { runReviewFlow } = await import("../review/server.ts");
+  const timeoutMs = args.timeout ? Number(args.timeout) * 1000 : 600_000;
+  const outcome = await runReviewFlow(ctx, compiled, { timeoutMs, ...reviewOpts });
+  // Exit codes for the agent loop: 0 = approved and pushed whole,
+  // 2 = changes requested (notes on stdout), 1 = timeout/stale/push failure.
+  if (outcome.status === "timeout" || outcome.status === "stale" || outcome.pushFailure) {
     Deno.exit(1);
   }
-  const createdNote = result.refMap.size
-    ? ` · created: ${
-      [...result.refMap.entries()].map(([r, k]) => `${r} → ${bold(k)}`).join(", ")
-    }`
-    : "";
-  console.log(
-    green(`pushed ${compiled.ops.length} operation${compiled.ops.length === 1 ? "" : "s"}`) +
-      createdNote,
-  );
-  console.log(dim(`journal: ${result.journalPath}`));
+  if (outcome.status === "changes-requested") Deno.exit(2);
 }
 
 /** Refuse (before any mutation) if remote moved past our base for any staged ticket. */
@@ -163,11 +145,16 @@ export interface PushResult {
 }
 
 /** Execute ops in order, settle all local layers against reality, journal, prune chain. */
-export async function executePush(ctx: PushContext, ops: CompiledOp[]): Promise<PushResult> {
+export async function executePush(
+  ctx: PushContext,
+  ops: CompiledOp[],
+  review?: JournalEntry["review"],
+): Promise<PushResult> {
   const { store, client } = ctx;
   const journal: JournalEntry = {
     startedAt: new Date().toISOString(),
     result: "success",
+    ...(review ? { review } : {}),
     ops: [],
     created: {},
   };

@@ -1,5 +1,5 @@
 /**
- * Self-contained HTML rendering for the review page (jt push --await-user) and the
+ * Self-contained HTML rendering for the review page (jt push) and the
  * read-only diff view (jt diff --web). Everything is rendered server-side from the
  * tool-owned layers; the page's only dynamism is tab switching, per-ticket decisions,
  * and the single POST that reports them.

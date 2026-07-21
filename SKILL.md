@@ -65,20 +65,22 @@ jt fetch PROJ-123          # or: jt fetch --jql 'project = PROJ AND sprint in op
 # edit tickets/PROJ-123.json (the ONLY files you may edit are in tickets/)
 jt diff                    # inspect what changed
 jt commit -m "round 1: …"  # stage the proposal (local, safe); -m narrates the round
-jt push --await-user       # THE ONLY REMOTE-MUTATING COMMAND — opens a browser review
-                           # page; the user approves/rejects per ticket; only approved
-                           # tickets are sent
+jt push                    # THE ONLY REMOTE-MUTATING COMMAND — approval-only: serves a
+                           # browser review page, and a human decision there is the
+                           # only thing that executes. There is no headless push.
 ```
 
-**Prefer `jt push --await-user` whenever a human is in the loop.** It renders the
-changeset as a PR-style page (full diff, per-round commit deltas, "since your last
-review", tickets unchanged since the last review auto-collapsed), served by the same
-process that executes the push. The gate is **atomic**: the user either approves the
-WHOLE changeset (everything ships, exactly as rendered) or requests changes (NOTHING
-ships; their per-ticket notes come back on stdout). Exit codes: `0` approved & pushed ·
-`2` changes requested (read the notes, act, push again) · `1` timeout/stale/failure.
-Run it in the background if your tool-call timeout is shorter than the review timeout
-(default 600s; `--timeout`).
+**Every push goes through the review gate — there is no way around it.** `jt push`
+renders the changeset as a PR-style page (full diff, per-round commit deltas, "since
+your last review", tickets unchanged since the last review auto-collapsed), served by
+the same process that executes the push. The gate is **atomic**: the user either
+approves the WHOLE changeset (everything ships, exactly as rendered) or requests
+changes (NOTHING ships; their per-ticket notes come back on stdout). Exit codes:
+`0` approved & pushed · `2` changes requested (read the notes, act, push again) ·
+`1` timeout/stale/failure. Run it in the background if your tool-call timeout is
+shorter than the review timeout (default 600s; `--timeout`). `jt push --dry-run`
+prints the compiled API ops without serving or sending anything. Approved pushes are
+journaled with decision provenance (time-to-decision, browser user agent).
 
 Acting on notes: if a note asks for edits, edit the working file, `jt commit -m` a new
 round, push again. If a note says to ship without a particular ticket, run

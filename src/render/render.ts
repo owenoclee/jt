@@ -188,6 +188,11 @@ export function renderJournalEntry(path: string, e: JournalEntry): string {
     ? cyan(e.result)
     : red(e.result);
   lines.push(`${bold(e.startedAt)}  ${badge}  ${dim(path)}`);
+  if (e.review) {
+    const secs = (e.review.decideMs / 1000).toFixed(e.review.decideMs < 10_000 ? 1 : 0);
+    const ua = e.review.userAgent ? ` · ${e.review.userAgent.slice(0, 60)}` : "";
+    lines.push(`  ${dim(`approved in the browser ${secs}s after serving${ua}`)}`);
+  }
   for (const op of e.ops) {
     const status = op.ok ? green(String(op.status ?? "ok")) : red(String(op.status ?? "ERR"));
     lines.push(`  ${status}  ${op.method.padEnd(6)} ${op.path}  ${dim(op.label)}`);

@@ -22,6 +22,21 @@ function readTicket(store: Store, id: string): Ticket {
   return wf.ticket;
 }
 
+/** Push is approval-only: drive the review page over HTTP and approve the changeset. */
+async function pushApproved(argv: string[] = []): Promise<void> {
+  let url = "";
+  const done = cmdPush(argv, { onServe: (u) => (url = u) });
+  while (!url) await new Promise((r) => setTimeout(r, 5));
+  const res = await fetch(url.replace("/review/", "/decide/"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ decision: "approve", notes: {} }),
+  });
+  assertEquals(res.status, 200);
+  await res.body?.cancel();
+  await done;
+}
+
 Deno.test("e2e: full lifecycle against mock Jira", async (t) => {
   const mock = new MockJira();
   mock.seedIssue({ summary: "Seeded task", labels: ["seed"], storyPoints: 3 });
@@ -68,7 +83,7 @@ Deno.test("e2e: full lifecycle against mock Jira", async (t) => {
         comments: [...ticket.comments, { body: "posted by jt e2e" }],
       });
       cmdCommit([]);
-      await cmdPush([]);
+      await pushApproved();
 
       const remote = mock.issues.get("TST-1")!;
       assertEquals(remote.summary, "Seeded task (edited)");
@@ -93,7 +108,7 @@ Deno.test("e2e: full lifecycle against mock Jira", async (t) => {
       cmdCommit([]);
       // tamper AFTER commit
       store.writeWorking("TST-1", { ...ticket, summary: "TAMPERED change" });
-      await cmdPush([]);
+      await pushApproved();
       assertEquals(mock.issues.get("TST-1")!.summary, "approved change");
       // the tampered working copy survives as an uncommitted local edit
       assertEquals(store.status()[0].state, "modified");
@@ -128,7 +143,7 @@ Deno.test("e2e: full lifecycle against mock Jira", async (t) => {
       store.writeWorking("@epic1", epic);
       store.writeWorking("@story1", story);
       cmdCommit([]);
-      await cmdPush([]);
+      await pushApproved();
 
       // created remotely with parent chain
       const epicRemote = [...mock.issues.values()].find((i) => i.summary === "Big epic")!;
@@ -190,19 +205,25 @@ Deno.test("e2e: full lifecycle against mock Jira", async (t) => {
       const doomed = [...mock.issues.values()].find((i) => i.summary === "Child story")!;
       cmdRm([doomed.key]);
       cmdCommit([]);
-      await cmdPush([]);
+      await pushApproved();
       assertEquals(mock.issues.has(doomed.key), false);
       assertEquals(store.readBase(doomed.key), null);
       assertEquals(store.readDeletions(), []);
       assertEquals(mock.links.size, 0, "links to the deleted issue are gone");
     });
 
-    await t.step("push journal recorded every operation", () => {
+    await t.step("push journal recorded every operation with approval provenance", () => {
       const journal = store.listJournal();
       assert(journal.length >= 3);
       const allOps = journal.flatMap((j) => j.entry.ops);
       assert(allOps.every((op) => op.ok));
       assertStringIncludes(JSON.stringify(allOps), "/rest/api/3/issue");
+      // Push is approval-only: every entry carries the decision's provenance.
+      for (const j of journal) {
+        assert(j.entry.review, "journal entry missing review provenance");
+        assert(j.entry.review!.decideMs >= 0);
+        assert(j.entry.review!.userAgent, "decision POST recorded no user agent");
+      }
     });
   } finally {
     console.log = origLog;

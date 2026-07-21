@@ -56,14 +56,15 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
     jt rm KEY               stage remote deletion   ·   jt untrack ID  drop locally
     jt resolve KEY          accept working file as desired state after a pull conflict
 
-  push (the only remote-mutating verb)
-    jt push [--dry-run]     compile committed−base → print exact API ops → execute → journal
-    jt push --await-user [--timeout SECS]
-                            serve the changeset as a browser review page. ONE decision:
-                            Approve & push (whole changeset) or Request changes (nothing
-                            sent; per-ticket notes returned). Prints the URL — agent or
-                            user opens it.
+  push (the only remote-mutating verb — approval-only)
+    jt push [--timeout SECS]
+                            compile committed−base → serve the changeset as a browser
+                            review page. ONE human decision: Approve & push (the WHOLE
+                            changeset, exactly as rendered) or Request changes (nothing
+                            sent; per-ticket notes returned). Prints the URL — there is
+                            no headless push.
                             exit 0 pushed · 2 changes requested · 1 timeout/stale
+    jt push --dry-run       print the compiled API ops and stop (nothing served or sent)
 
   agent docs: jt schema   (ticket file JSON Schema) · see SKILL.md
 `;

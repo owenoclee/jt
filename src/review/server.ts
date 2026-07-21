@@ -1,9 +1,10 @@
 /**
- * The --await-user review flow: serve the changeset as a PR-style page on loopback,
- * wait for the human's single decision — Approve & push (the WHOLE changeset) or
- * Request changes (nothing sent; per-ticket notes return to the agent) — then act.
- * The reviewing process and the sending process are the same process, and an approved
- * page is sent whole: what you saw is exactly what ships, as a unit.
+ * The jt push review flow (the only path to a remote mutation): serve the changeset
+ * as a PR-style page on loopback, wait for the human's single decision — Approve &
+ * push (the WHOLE changeset) or Request changes (nothing sent; per-ticket notes
+ * return to the agent) — then act. The reviewing process and the sending process are
+ * the same process, and an approved page is sent whole: what you saw is exactly what
+ * ships, as a unit. Decision provenance (latency, user agent) lands in the journal.
  */
 import { readChain, writeReviewMarker } from "../chain.ts";
 import { checkStaleness, executePush, type PushContext } from "../commands/push.ts";
@@ -25,6 +26,8 @@ export interface ReviewOptions {
 export interface Decision {
   decision: "approve" | "request-changes";
   notes: Record<string, string>;
+  /** Recorded server-side at the decision POST — never taken from the payload. */
+  provenance?: { decidedAt: string; decideMs: number; userAgent: string | null };
 }
 
 export interface ReviewOutcome {
@@ -80,7 +83,7 @@ export async function runReviewFlow(
   }
 
   console.log("");
-  const result = await executePush(ctx, compiled.ops);
+  const result = await executePush(ctx, compiled.ops, decision.provenance);
   console.log("");
   const createdNote = result.refMap.size
     ? ` · created: ${[...result.refMap.entries()].map(([r, k]) => `${r} → ${bold(k)}`).join(", ")}`
@@ -106,6 +109,7 @@ async function serveAndAwait(
   let resolveDecision!: (d: Decision) => void;
   const decided = new Promise<Decision>((r) => (resolveDecision = r));
   let done = false;
+  const servedAtMs = Date.now();
 
   const html = renderPage(model);
   const server = Deno.serve(
@@ -123,7 +127,15 @@ async function serveAndAwait(
           }
           const notes = body.notes && typeof body.notes === "object" ? body.notes : {};
           done = true;
-          resolveDecision({ decision: body.decision, notes });
+          resolveDecision({
+            decision: body.decision,
+            notes,
+            provenance: {
+              decidedAt: new Date().toISOString(),
+              decideMs: Date.now() - servedAtMs,
+              userAgent: req.headers.get("user-agent"),
+            },
+          });
           return Response.json({ ok: true });
         } catch {
           return Response.json({ ok: false }, { status: 400 });

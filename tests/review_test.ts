@@ -1,5 +1,5 @@
 /**
- * Review-flow integration: drives jt push --await-user's server over real HTTP
+ * Review-flow integration: drives jt push's review server over real HTTP
  * against the mock Jira — atomic approve/request-changes, per-ticket notes,
  * uncommit reshaping the changeset between rounds, unchanged-since-review
  * collapse, timeout.

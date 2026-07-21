@@ -182,6 +182,12 @@ export interface JournalEntry {
   startedAt: string;
   finishedAt?: string;
   result: "success" | "partial" | "dry-run";
+  /**
+   * Approval provenance, recorded server-side at the decision POST. Every push goes
+   * through the review page, so its absence — or an implausibly fast decideMs / non-
+   * browser userAgent — is tamper evidence, not a normal state.
+   */
+  review?: { decidedAt: string; decideMs: number; userAgent: string | null };
   ops: JournalOpResult[];
   created?: Record<string, string>;
   error?: string;

@@ -51,6 +51,26 @@ Deno.test("status: hand-deleted working file is flagged", () => {
   assertEquals(st.state, "missing");
 });
 
+Deno.test("status and ticket listings sort issue numbers numerically", () => {
+  const store = tempStore();
+  const keys = ["SCRUM-599", "SCRUM-60", "SCRUM-601", "SCRUM-600"];
+
+  for (const key of keys) {
+    const ticket = makeTicket({ key, project: "SCRUM", summary: key });
+    store.writeBase(makeBaseEntry(ticket));
+    store.writeWorking(key, ticket);
+    store.writeCommitted(key, serializeTicket(ticket));
+  }
+  store.ackSeen();
+
+  const expected = ["SCRUM-60", "SCRUM-599", "SCRUM-600", "SCRUM-601"];
+  assertEquals(store.status().map((s) => s.id), expected);
+  assertEquals(store.listWorking().map((w) => w.id), expected);
+  assertEquals(store.listBaseKeys(), expected);
+  assertEquals(store.listCommittedIds(), expected);
+  assertEquals(store.listSeenKeys(), expected);
+});
+
 Deno.test("cosmetic reordering is not a change", () => {
   const store = tempStore();
   const base = makeTicket({

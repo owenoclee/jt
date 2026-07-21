@@ -11,6 +11,7 @@ import { ticketsEqual } from "../canonical.ts";
 import { localContext } from "../context.ts";
 import { type DiffEntry, diffTickets } from "../diff.ts";
 import { fail } from "../errors.ts";
+import { compareTicketIds } from "../keys.ts";
 import { makeRefContext } from "../refs.ts";
 import { bold, dim, green, red } from "../render/colors.ts";
 import { renderDiffEntries } from "../render/render.ts";
@@ -63,7 +64,7 @@ export function cmdChanges(argv: string[], webOpts: ChangesWebOptions = {}): voi
   }
 
   const conflicts = new Map(store.readConflicts().map((c) => [c.key, c]));
-  const keys = [...new Set([...baseKeys, ...seenKeys])].sort().filter(wanted);
+  const keys = [...new Set([...baseKeys, ...seenKeys])].sort(compareTicketIds).filter(wanted);
   const items: ChangeItem[] = [];
 
   for (const key of keys) {

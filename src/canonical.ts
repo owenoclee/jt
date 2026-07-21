@@ -6,6 +6,7 @@
  * reordering by the agent never reads as a change.
  */
 import type { CommentEntry, LinkEntry, Ticket } from "./types.ts";
+import { compareTicketIds } from "./keys.ts";
 
 const KEY_ORDER: (keyof Ticket)[] = [
   "key",
@@ -49,7 +50,7 @@ export function normalizeTicket(t: Ticket): Ticket {
 }
 
 function compareLinks(a: LinkEntry, b: LinkEntry): number {
-  return a.type.localeCompare(b.type) || a.to.localeCompare(b.to);
+  return a.type.localeCompare(b.type) || compareTicketIds(a.to, b.to);
 }
 
 /** Stable, fixed-key-order JSON with trailing newline. */

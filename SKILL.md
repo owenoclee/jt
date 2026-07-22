@@ -16,13 +16,17 @@ A directory is a `jt` workspace if it contains:
 .jira/config.json
 ```
 
-Starting at the current directory, check that directory and each ancestor for
-`.jira/config.json`. This is also how `jt` locates a workspace automatically. If found,
-use the nearest workspace.
+Locate a workspace with two checks, in this order — run these exact commands rather
+than improvising a search:
 
-If no ancestor workspace exists, search the conventional durable location `~/jira/` for
-directories containing `.jira/config.json`. If a suitable workspace is found there, use
-it after confirming the project.
+1. `jt config show` — it walks up from the current directory itself. If it prints a
+   workspace, use that one (the nearest ancestor); if it errors, move to step 2.
+2. `ls -d ~/jira/*/.jira/config.json` — each hit is a workspace exactly one directory
+   under the conventional durable location `~/jira/` (for example `~/jira/SBX`). Pick
+   the one whose config matches the project and confirm with the user. The config file
+   always sits at `<workspace>/.jira/config.json`, so a recursive or depth-limited
+   `find` is never needed — and depth-limited variants have wrongly concluded that no
+   workspace exists.
 
 If no workspace exists, propose creating `~/jira/<PROJECT_KEY>/` and ask for confirmation
 before creating that directory or initializing it.
@@ -93,6 +97,26 @@ a ticket while keeping its working edits, run `jt uncommit ID`; the next review 
 marks it withdrawn rather than silently dropping it. To discard working edits, run
 `jt restore ID`.
 
+## Layers and undo verbs
+
+Ticket state lives in four layers: **working** (`tickets/*.json`, yours to edit),
+**committed** (the staged changeset push will send), **base** (last-fetched remote
+state), and **seen** (the news baseline behind `jt changes`). Each undo verb targets
+exactly one of them — pick by which layer you need to move:
+
+- `jt uncommit ID` — removes the committed copy only; the working file keeps your
+  edits. Like `git restore --staged`.
+- `jt restore ID` — resets the working file to the committed copy if one is staged,
+  otherwise to base; also undoes a staged `jt rm`. Like `git checkout -- <file>`. It
+  never touches the committed copy: to abandon a change that is already committed,
+  run `jt uncommit` first, then `jt restore`.
+- `jt untrack ID` — removes every local layer for the ticket; Jira is untouched.
+- `jt resolve KEY` — after a pull conflict only: advances base to the latest remote
+  and keeps your whole working file as the desired state. Fields you never edited may
+  still hold pre-conflict values, so the next diff can propose reverting the remote's
+  newer edits to them — always run `jt diff` after `jt resolve` and fast-forward any
+  such field by hand before committing.
+
 ## Hard rules
 
 - Edit ticket files only in `tickets/`.
@@ -105,6 +129,9 @@ marks it withdrawn rather than silently dropping it. To discard working edits, r
   their `jt` installation. Do not ask them to paste credentials into chat. Continue only
   after `jt config show` reports a credential source.
 - Never interact with a review-page URL yourself.
+- `jt push` is itself the approval gate: nothing reaches Jira without the human's
+  explicit decision on the review page. Never ask permission to run it — that gates
+  the gate. Commit, push, and hand the user the URL.
 - Existing comments are append-only. Add a comment without an `id`; never edit or
   remove one with an `id`.
 - Existing ticket files retain their `<KEY>.json` name and `key` field.

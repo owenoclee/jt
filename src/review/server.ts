@@ -19,7 +19,9 @@ import { buildTicketPlans } from "./plan.ts";
 export interface ReviewOptions {
   timeoutMs: number;
   port?: number;
-  /** Test hook: called with the review URL once the server is listening. */
+  /** Print the review URL to stdout (default true; the detached server passes false). */
+  announce?: boolean;
+  /** Called with the review URL once the server is listening. */
   onServe?: (url: string) => void;
 }
 
@@ -147,8 +149,10 @@ async function serveAndAwait(
 
   const addr = server.addr as Deno.NetAddr;
   const reviewUrl = `http://127.0.0.1:${addr.port}/review/${model.nonce}`;
-  console.log(`${bold("review page:")} ${reviewUrl}`);
-  console.log(dim("open this URL in a browser to decide — waiting..."));
+  if (opts.announce !== false) {
+    console.log(`${bold("review page:")} ${reviewUrl}`);
+    console.log(dim("open this URL in a browser to decide — waiting..."));
+  }
   opts.onServe?.(reviewUrl);
 
   let timer: ReturnType<typeof setTimeout> | undefined;

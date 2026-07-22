@@ -47,7 +47,7 @@ export async function cmdPush(
   reviewOpts: Partial<ReviewOptions> = {},
 ): Promise<void> {
   const args = parseArgs(argv, {
-    boolean: ["dry-run"],
+    boolean: ["dry-run", "full"],
     string: ["timeout"],
   });
   const ctx = withClient(withMeta(localContext()));
@@ -56,7 +56,7 @@ export async function cmdPush(
   await checkStaleness(ctx, compiled.existingKeys);
 
   if (args["dry-run"]) {
-    printPlan(compiled.ops, compiled.warnings);
+    printPlan(compiled.ops, compiled.warnings, { full: Boolean(args.full) });
     console.log(`\n${cyan("dry-run")} — nothing sent`);
     return;
   }
@@ -128,18 +128,49 @@ async function remoteUpdated(ctx: PushContext, keys: string[]): Promise<Map<stri
   return out;
 }
 
-export function printPlan(ops: CompiledOp[], warnings: string[]): void {
+export function printPlan(
+  ops: CompiledOp[],
+  warnings: string[],
+  opts: { full?: boolean } = {},
+): void {
   console.log(bold(`push plan (${ops.length} operation${ops.length === 1 ? "" : "s"}):`));
   for (const w of warnings) console.log(`  ${yellow("warning:")} ${w}`);
+  const elided = { n: 0 };
   for (const op of ops) {
     console.log(`\n  ${cyan(op.method.padEnd(6))} ${op.path}  ${dim(op.label)}`);
     if (op.body !== undefined) {
-      console.log(indent(JSON.stringify(op.body, null, 2), "    "));
+      const body = opts.full ? op.body : elideAdf(op.body, elided);
+      console.log(indent(JSON.stringify(body, null, 2), "    "));
     }
     if (op.transitionTo && !op.body) {
       console.log(dim(`    (transition to '${op.transitionTo}' — id resolved after creation)`));
     }
   }
+  if (elided.n > 0) {
+    console.log(
+      dim(
+        `\n  (${elided.n} ADF rich-text bod${elided.n === 1 ? "y" : "ies"} elided — ` +
+          `jt diff --committed shows the text, --dry-run --full the raw JSON)`,
+      ),
+    );
+  }
+}
+
+/**
+ * Replace ADF documents (compiled descriptions and comment bodies — easily 10x the
+ * markdown they encode) with a short placeholder for the default dry-run print.
+ */
+function elideAdf(node: unknown, count: { n: number }): unknown {
+  if (Array.isArray(node)) return node.map((item) => elideAdf(item, count));
+  if (node && typeof node === "object") {
+    const rec = node as Record<string, unknown>;
+    if (rec.type === "doc" && Array.isArray(rec.content)) {
+      count.n++;
+      return `(ADF document · ${JSON.stringify(node).length} chars)`;
+    }
+    return Object.fromEntries(Object.entries(rec).map(([k, v]) => [k, elideAdf(v, count)]));
+  }
+  return node;
 }
 
 export interface PushResult {

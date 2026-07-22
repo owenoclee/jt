@@ -418,7 +418,7 @@ export async function cmdResolve(argv: string[]): Promise<void> {
 }
 
 export function cmdLog(argv: string[]): void {
-  const args = parseArgs(argv, { boolean: ["all"] });
+  const args = parseArgs(argv, { boolean: ["all", "full"] });
   const { store } = localContext();
   const entries = store.listJournal();
   if (entries.length === 0) {
@@ -426,7 +426,9 @@ export function cmdLog(argv: string[]): void {
     return;
   }
   const shown = args.all ? entries : entries.slice(0, 10);
-  console.log(shown.map((e) => renderJournalEntry(e.path, e.entry)).join("\n\n"));
+  console.log(
+    shown.map((e) => renderJournalEntry(e.path, e.entry, { full: Boolean(args.full) })).join("\n\n"),
+  );
   if (!args.all && entries.length > shown.length) {
     console.log(dim(`\n(${entries.length - shown.length} older — jt log --all)`));
   }

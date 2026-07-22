@@ -52,10 +52,12 @@ jt status
 ```
 
 `jt pull` synchronizes Jira and rebases non-overlapping remote edits. `jt changes`
-reports remote changes since the last acknowledgment. Surface non-empty output to the
-user; run `jt changes --ack` only after it has been seen or handled. Changes the user
-approved on a push review page are recorded as seen automatically and do not reappear
-here.
+reports remote changes since the last acknowledgment, compactly: description edits
+appear as ±line counts (`jt changes --full` prints the line diffs when they matter).
+Surface non-empty output to the user; run `jt changes --ack` only after it has been
+seen or handled — it records the ack and prints counts only, without repeating the
+diffs. Changes the user approved on a push review page are recorded as seen
+automatically and do not reappear here.
 
 Use `jt fetch KEY...` when tracking individual tickets rather than a mirror.
 
@@ -175,6 +177,10 @@ jt diff --web
 jt changes --web
 jt log
 ```
+
+Terminal output is compact by default; `--full` on `jt changes`, `jt log`, and
+`jt push --dry-run` prints the long form (description line diffs, every journal op,
+raw ADF bodies). Prefer the compact defaults unless the detail is needed.
 
 The `--web` read commands produce a page or path for the user. As with review pages,
 do not load localhost pages yourself.

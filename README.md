@@ -65,7 +65,12 @@ jt push
 - **Approve & push** sends the whole changeset exactly as shown.
 - **Request changes** sends nothing and returns per-ticket notes.
 
-Use `jt push --dry-run` to print the compiled API operations without serving a page or
+Each card also lists the ticket's unchanged fields (epic, labels, sprint, …) as muted
+context below the diff; the ⚙ **fields** control picks which ones appear (description
+is off by default).
+
+Use `jt push --dry-run` to print the compiled API operations (rich-text bodies elided;
+`--full` for the raw ADF JSON) without serving a page or
 sending anything.
 
 ## Workspaces
@@ -99,8 +104,8 @@ the last acknowledgment:
 
 ```sh
 jt pull
-jt changes
-jt changes --ack
+jt changes          # compact: description edits show as ±line counts (--full for diffs)
+jt changes --ack    # records the ack; prints counts only, never reprints
 ```
 
 Pulling never advances the acknowledgment baseline. An approved push does, for exactly

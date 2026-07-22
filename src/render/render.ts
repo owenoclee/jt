@@ -67,6 +67,7 @@ export function renderDiffEntries(
   summary: string,
   entries: DiffEntry[],
   refs: RefContext = NO_REFS,
+  opts: { compactText?: boolean } = {},
 ): string {
   const lines: string[] = [`${bold(id)}  ${summary}`];
   for (const e of entries) {
@@ -109,8 +110,20 @@ export function renderDiffEntries(
         }
         break;
       case "text": {
-        lines.push(`  ${cyan("description")}:`);
         const hunks = lineDiff(e.from ?? "", e.to ?? "");
+        if (opts.compactText) {
+          let add = 0;
+          let del = 0;
+          for (const h of hunks) {
+            for (const l of h.lines) {
+              if (l.op === "+") add++;
+              else if (l.op === "-") del++;
+            }
+          }
+          lines.push(`  ${cyan("description")}: ${green(`+${add}`)} ${red(`−${del}`)} lines`);
+          break;
+        }
+        lines.push(`  ${cyan("description")}:`);
         for (const h of hunks) {
           for (const l of h.lines) {
             const text = `    ${l.op} ${l.text}`;
@@ -180,7 +193,11 @@ function indent(text: string, pad: string): string {
   return text.split("\n").map((l) => (l ? pad + l : l)).join("\n");
 }
 
-export function renderJournalEntry(path: string, e: JournalEntry): string {
+export function renderJournalEntry(
+  path: string,
+  e: JournalEntry,
+  opts: { full?: boolean } = {},
+): string {
   const lines: string[] = [];
   const badge = e.result === "success"
     ? green(e.result)
@@ -193,10 +210,16 @@ export function renderJournalEntry(path: string, e: JournalEntry): string {
     const ua = e.review.userAgent ? ` · ${e.review.userAgent.slice(0, 60)}` : "";
     lines.push(`  ${dim(`approved in the browser ${secs}s after serving${ua}`)}`);
   }
-  for (const op of e.ops) {
+  // Compact by default: failures always get their own lines; successes fold into a count.
+  const shown = opts.full ? e.ops : e.ops.filter((op) => !op.ok);
+  for (const op of shown) {
     const status = op.ok ? green(String(op.status ?? "ok")) : red(String(op.status ?? "ERR"));
     lines.push(`  ${status}  ${op.method.padEnd(6)} ${op.path}  ${dim(op.label)}`);
     if (!op.ok && op.error) lines.push(`         ${red(op.error)}`);
+  }
+  if (!opts.full) {
+    const ok = e.ops.length - shown.length;
+    lines.push(`  ${dim(`${ok} op${ok === 1 ? "" : "s"} ✓ (jt log --full to list)`)}`);
   }
   if (e.created && Object.keys(e.created).length) {
     lines.push(

@@ -83,7 +83,10 @@ export function renderTicketDelta(
 ): string {
   if (!from && !to) return "";
   if (!from && to) return renderTicketCard(to, "create", refs);
-  if (from && !to) return `<div class="delete-card">staged deletion of <b>${escapeHtml(from.summary)}</b></div>`;
+  if (from && !to) {
+    return `<div class="delete-card">staged deletion of <b>${escapeHtml(from.summary)}</b></div>` +
+      renderContextRows(from, new Set(), refs);
+  }
   const entries = diffTickets(from!, to!);
   if (entries.length === 0) return `<div class="nochange">no changes</div>`;
   const rows: string[] = [];
@@ -158,7 +161,65 @@ export function renderTicketDelta(
       }
     }
   }
-  return rows.join("\n");
+  const changed = new Set<string>(entries.map((e) => e.field));
+  return rows.join("\n") + renderContextRows(to!, changed, refs);
+}
+
+/**
+ * Muted rows for the fields a delta does NOT touch — the rest of the ticket (its Epic,
+ * labels, sprint, …) as glanceable context. Every row carries data-ctx-field so the
+ * page's ⚙ panel can show/hide unchanged fields globally and per field; the whole
+ * block stays hidden until that script runs.
+ */
+export function renderContextRows(
+  t: Ticket,
+  changed: Set<string>,
+  refs: RefContext = NO_REFS,
+): string {
+  const rows: string[] = [];
+  const none = (label = "none") => `<i class="none">${label}</i>`;
+  const row = (field: string, html: string, block = false) =>
+    rows.push(
+      `<div class="frow ctx" data-ctx-field="${escapeHtml(field)}">` +
+        `<span class="fname">${escapeHtml(field)}</span>` +
+        (block ? html : `<span class="ctxval">${html}</span>`) +
+        `</div>`,
+    );
+  if (!changed.has("type")) row("type", escapeHtml(t.type));
+  if (!changed.has("status") && t.status) row("status", escapeHtml(t.status));
+  if (!changed.has("labels")) {
+    row(
+      "labels",
+      t.labels.length
+        ? t.labels.map((l) => `<span class="chip">${escapeHtml(l)}</span>`).join(" ")
+        : none(),
+    );
+  }
+  if (!changed.has("parent")) row("parent", t.parent ? refHtml(t.parent, refs) : none());
+  if (!changed.has("sprint")) {
+    row("sprint", t.sprint === null ? none("backlog") : escapeHtml(String(t.sprint)));
+  }
+  if (!changed.has("assignee")) {
+    row("assignee", t.assignee ? escapeHtml(t.assignee) : none("unassigned"));
+  }
+  if (!changed.has("priority")) row("priority", t.priority ? escapeHtml(t.priority) : none());
+  for (const [k, v] of Object.entries(t.fields)) {
+    if (changed.has(`fields.${k}`)) continue;
+    row(k, v === null ? none() : escapeHtml(typeof v === "string" ? v : JSON.stringify(v)));
+  }
+  if (!changed.has("links") && t.links.length) {
+    row(
+      "links",
+      t.links
+        .map((l) => `<span class="chip">${escapeHtml(l.type)} ${refHtml(l.to, refs)}</span>`)
+        .join(" "),
+    );
+  }
+  if (!changed.has("description") && t.description !== null) {
+    row("description", `<div class="desc md ctxval">${mdToHtml(t.description)}</div>`, true);
+  }
+  if (rows.length === 0) return "";
+  return `<div class="ctx-block"><div class="ctx-head">unchanged fields</div>${rows.join("")}</div>`;
 }
 
 export function renderTicketCard(t: Ticket, badge: string, refs: RefContext = NO_REFS): string {
@@ -366,6 +427,63 @@ export function renderPage(model: ReviewPageModel): string {
       b.closest('section.ticket').classList.remove('collapsed');
       b.remove();
     }));`;
+  // Unchanged-field context: the ⚙ panel controls a master toggle plus one checkbox per
+  // field found on the page. Preferences persist in localStorage (best effort — the
+  // origin varies across pushes because the port is random). No \${} interpolation here.
+  const ctxJs = `
+    const ctxFields = [...new Set(
+      [...document.querySelectorAll('[data-ctx-field]')].map((el) => el.dataset.ctxField),
+    )];
+    if (ctxFields.length) {
+      const gear = document.getElementById('fieldgear');
+      const cfg = document.getElementById('fieldcfg');
+      const master = document.getElementById('ctxmaster');
+      const list = document.getElementById('cfgfields');
+      gear.hidden = false;
+      let prefs = { show: true, hidden: ['description'] };
+      try {
+        const saved = JSON.parse(localStorage.getItem('jt-ctx-fields'));
+        if (saved && typeof saved.show === 'boolean' && Array.isArray(saved.hidden)) prefs = saved;
+      } catch {}
+      for (const f of ctxFields) {
+        const label = document.createElement('label');
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.dataset.field = f;
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(' ' + f));
+        list.appendChild(label);
+      }
+      function applyCtx() {
+        document.body.classList.toggle('show-ctx', prefs.show);
+        master.checked = prefs.show;
+        for (const cb of list.querySelectorAll('input')) {
+          cb.checked = !prefs.hidden.includes(cb.dataset.field);
+          cb.disabled = !prefs.show;
+        }
+        document.querySelectorAll('.frow.ctx').forEach((el) => {
+          el.classList.toggle('ctx-off', prefs.hidden.includes(el.dataset.ctxField));
+        });
+        document.querySelectorAll('.ctx-block').forEach((b) => {
+          const anyVisible = [...b.querySelectorAll('.frow.ctx')]
+            .some((el) => !el.classList.contains('ctx-off'));
+          b.classList.toggle('empty', !anyVisible);
+        });
+        try { localStorage.setItem('jt-ctx-fields', JSON.stringify(prefs)); } catch {}
+      }
+      gear.addEventListener('click', () => { cfg.hidden = !cfg.hidden; });
+      document.addEventListener('click', (e) => {
+        if (!cfg.hidden && !cfg.contains(e.target) && !gear.contains(e.target)) cfg.hidden = true;
+      });
+      master.addEventListener('change', () => { prefs.show = master.checked; applyCtx(); });
+      list.addEventListener('change', (e) => {
+        const f = e.target.dataset.field;
+        prefs.hidden = prefs.hidden.filter((x) => x !== f);
+        if (!e.target.checked) prefs.hidden.push(f);
+        applyCtx();
+      });
+      applyCtx();
+    }`;
 
   return `<!doctype html>
 <html lang="en">
@@ -385,6 +503,13 @@ ${infoBanner}
   <button class="tab active" data-tab="changes">changes (${model.tickets.length})</button>
   ${sinceTab}
   ${commitTabs}
+  <div class="gearwrap">
+    <button class="tab" id="fieldgear" type="button" title="choose which unchanged fields to show" hidden>⚙ fields</button>
+    <div id="fieldcfg" hidden>
+      <label><input type="checkbox" id="ctxmaster"> show unchanged fields</label>
+      <div id="cfgfields"></div>
+    </div>
+  </div>
 </nav>
 <main>
   <div class="panel" id="changes">${ticketCards}</div>
@@ -393,13 +518,14 @@ ${infoBanner}
 </main>
 ${footer}
 <script>
-document.querySelectorAll('.tab').forEach((b) => b.addEventListener('click', () => {
-  document.querySelectorAll('.tab').forEach((x) => x.classList.remove('active'));
+document.querySelectorAll('.tab[data-tab]').forEach((b) => b.addEventListener('click', () => {
+  document.querySelectorAll('.tab[data-tab]').forEach((x) => x.classList.remove('active'));
   document.querySelectorAll('.panel').forEach((p) => p.hidden = true);
   b.classList.add('active');
   document.getElementById(b.dataset.tab).hidden = false;
 }));
 ${expandJs}
+${ctxJs}
 ${reviewJs}
 ${infoJs}
 </script>
@@ -477,6 +603,25 @@ section.ticket.collapsed > header { border-bottom: none; }
 .body { padding: 12px 14px; }
 .frow { display: flex; gap: 10px; align-items: baseline; padding: 3px 0; flex-wrap: wrap; }
 .fname { color: var(--muted); min-width: 90px; font-size: 12px; }
+/* Unchanged-field context: hidden until the ⚙ script applies the saved preferences. */
+.gearwrap { margin-left: auto; position: relative; }
+#fieldcfg { position: absolute; right: 0; top: calc(100% + 6px); background: var(--bg);
+  border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; min-width: 220px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.18); z-index: 10; display: flex; flex-direction: column;
+  gap: 4px; font-size: 13px; }
+#fieldcfg[hidden] { display: none; }
+#fieldcfg label { display: flex; gap: 6px; align-items: center; cursor: pointer; white-space: nowrap; }
+#fieldcfg > label { font-weight: 600; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+#cfgfields { display: flex; flex-direction: column; gap: 2px; max-height: 40vh; overflow-y: auto; }
+.ctx-block { display: none; margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--border); }
+body.show-ctx .ctx-block { display: block; }
+body.show-ctx .ctx-block.empty { display: none; }
+.ctx-head { font-size: 10px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 2px; }
+.frow.ctx, .frow.ctx .ctxval { color: var(--muted); }
+.frow.ctx.ctx-off { display: none; }
+.frow.ctx .chip { opacity: .85; }
+.frow.ctx .desc.md { flex-basis: 100%; margin-top: 4px; }
 a.ref { color: inherit; text-decoration: underline dotted; text-underline-offset: 2px; }
 a.ref:hover { color: var(--accent); }
 h3 a.ref { text-decoration: none; }

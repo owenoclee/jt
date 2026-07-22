@@ -70,9 +70,8 @@ diff with a bold name, unchanged ones (epic, labels, sprint, …) appear as mute
 context in place; the ⚙ **fields** control picks which unchanged fields appear
 (description is off by default).
 
-Use `jt push --dry-run` to print the compiled API operations (rich-text bodies elided;
-`--full` for the raw ADF JSON) without serving a page or
-sending anything.
+Use `jt push --dry-run` to print the compiled API operations without serving a
+page or sending anything.
 
 ## Workspaces
 
@@ -105,8 +104,8 @@ the last acknowledgment:
 
 ```sh
 jt pull
-jt changes          # compact: description edits show as ±line counts (--full for diffs)
-jt changes --ack    # records the ack; prints counts only, never reprints
+jt changes
+jt changes --ack
 ```
 
 Pulling never advances the acknowledgment baseline. An approved push does, for exactly

@@ -8,7 +8,7 @@
  *   .jira/deletions.json      deletion intents (jt rm)
  *   .jira/conflicts.json      unresolved pull conflicts
  *   .jira/journal/            push audit log
- *   .jira/seen/<KEY>.json     last-acknowledged remote state (jt changes --ack)
+ *   .jira/seen/<KEY>.json     remote state as last known to the user (ack / approved pushes)
  *   .jira/sync.json           mirror watermark + scope membership (tool-owned)
  */
 import { basename, join } from "@std/path";
@@ -221,7 +221,8 @@ export class Store {
     }
   }
 
-  // ---- seen layer (last-acknowledged remote state; advances only on jt changes --ack) ----
+  // ---- seen layer (last-known-to-the-user remote state; advances on jt changes --ack
+  // and, for human-approved push deltas, during push settle) ----
 
   seenPath(key: string): string {
     return join(this.seenDir, `${key}.json`);
@@ -255,6 +256,11 @@ export class Store {
     } catch {
       // already gone
     }
+  }
+
+  writeSeen(key: string, ticket: Ticket): void {
+    Deno.mkdirSync(this.seenDir, { recursive: true });
+    Deno.writeTextFileSync(this.seenPath(key), serializeTicket(ticket));
   }
 
   /** Acknowledge upstream state: seen becomes a byte-copy of every base ticket. */

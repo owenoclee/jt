@@ -206,13 +206,13 @@ export function renderPage(model: ReviewPageModel): string {
       : `<a class="ref" href="${
         escapeHtml(`${model.target.baseUrl}/browse/${id}`)
       }" target="_blank" rel="noopener">${escapeHtml(id)}</a>`;
-    return `<h3>${label} <span class="summary">${escapeHtml(summary)}</span></h3>`;
+    return `<h3>${label} <span class="summary" title="${escapeHtml(summary)}">${escapeHtml(summary)}</span></h3>`;
   };
   const ticketCards = model.tickets.map((t) => {
     const collapsed = t.unchangedSinceReview;
     const unchangedBadge = collapsed
-      ? `<span class="unchanged">unchanged since your last review ✓</span>
-         <button class="expand" type="button">expand</button>`
+      ? `<span class="unchanged">unchanged since your last review ✓
+           <button class="expand" type="button">expand</button></span>`
       : "";
     const note = isReview
       ? `<div class="notebar" data-ticket="${escapeHtml(t.id)}">
@@ -224,7 +224,7 @@ export function renderPage(model: ReviewPageModel): string {
     return `<section class="ticket${collapsed ? " collapsed" : ""}" id="t-${
       escapeHtml(t.id)
     }" data-id="${escapeHtml(t.id)}">
-      <header>
+      <header${collapsed ? ' class="oneline"' : ""}>
         <span class="badge badge-${t.kind}">${t.kind}</span>
         ${heading(t.id, t.summary)}
         ${unchangedBadge}
@@ -463,7 +463,12 @@ body.info section.ticket { border-left: 4px solid var(--info); }
 .ack-hint { color: var(--muted); font-size: 12px; }
 #ack { background: var(--info); color: #fff; border: none; border-radius: 6px; padding: 8px 18px; font: inherit; font-weight: 600; cursor: pointer; }
 #ack:hover { filter: brightness(1.1); }
-.unchanged { font-size: 12px; color: var(--add-fg); margin-left: auto; }
+.unchanged { font-size: 12px; color: var(--add-fg); margin-left: auto; display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; flex-shrink: 0; }
+/* Already-seen cards keep a one-line header: a long title truncates (hover for the
+   full text) rather than wrapping the unchanged badge onto a second row. */
+section.ticket > header.oneline { flex-wrap: nowrap; }
+header.oneline .badge { flex-shrink: 0; }
+header.oneline h3 { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .expand { background: none; border: 1px solid var(--border); color: var(--muted); border-radius: 6px; padding: 2px 8px; font: inherit; font-size: 11px; cursor: pointer; }
 section.ticket.collapsed .body,
 section.ticket.collapsed details.ops,

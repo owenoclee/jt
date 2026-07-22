@@ -150,7 +150,14 @@ export async function compilePush(ctx: CompileContext): Promise<CompiledPush> {
       fail(`${key}: changing 'project' (moving issues between projects) is not supported`);
     }
 
-    const fields = await compileFieldUpdates(ctx, key, base.ticket, committed.ticket, warnings);
+    const fields = await compileFieldUpdates(
+      ctx,
+      key,
+      base.ticket,
+      committed.ticket,
+      createTickets,
+      warnings,
+    );
     if (Object.keys(fields).length > 0) {
       ops.push({
         label: `update ${key}`,
@@ -314,6 +321,7 @@ async function compileFieldUpdates(
   key: string,
   base: Ticket,
   committed: Ticket,
+  creates: Map<string, Ticket>,
   warnings: string[],
 ): Promise<Record<string, unknown>> {
   const { meta } = ctx;
@@ -334,9 +342,11 @@ async function compileFieldUpdates(
   }
   if (!fieldEqual(base, committed, "labels")) fields.labels = [...committed.labels].sort();
   if (!fieldEqual(base, committed, "parent")) {
-    if (committed.parent?.startsWith("@")) {
-      fail(`${key}: parent '${committed.parent}' — existing tickets cannot reference pending creations yet (push the creation first)`);
+    if (committed.parent?.startsWith("@") && !creates.has(committed.parent)) {
+      fail(`${key}: parent '${committed.parent}' is not a committed new ticket — commit it first`);
     }
+    // An @ref parent stays a placeholder here; creates run first and the ref
+    // resolves to the created key at execution time.
     fields.parent = committed.parent === null ? null : { key: committed.parent };
   }
   if (!fieldEqual(base, committed, "priority")) {

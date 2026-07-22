@@ -10,7 +10,14 @@
 // deno-lint-ignore-file no-explicit-any
 import { parseArgs } from "@std/cli";
 import { chunks } from "../batch.ts";
-import { serializeTicket, ticketsEqual } from "../canonical.ts";
+import {
+  fieldEqual,
+  getField,
+  serializeTicket,
+  setField,
+  ticketFieldNames,
+  ticketsEqual,
+} from "../canonical.ts";
 import { pruneChain } from "../chain.ts";
 import { compilePush, type CompiledPush } from "../compile.ts";
 import { localContext, withClient, withMeta } from "../context.ts";
@@ -20,6 +27,7 @@ import { searchPage } from "../jira/search.ts";
 import { bold, cyan, dim, green, red, yellow } from "../render/colors.ts";
 // Type-only: the runtime import of the review server stays dynamic (it imports us back).
 import type { ReviewOptions } from "../review/server.ts";
+import type { Store } from "../store.ts";
 import { fetchBaseEntry, integrateFetched } from "../sync.ts";
 import type {
   BaseEntry,
@@ -27,7 +35,9 @@ import type {
   CompiledOp,
   JournalEntry,
   JournalOpResult,
+  LinkEntry,
   Meta,
+  Ticket,
 } from "../types.ts";
 
 export type PushContext = ReturnType<typeof localContext> & { meta: Meta; client: JiraClient };
@@ -232,6 +242,7 @@ export async function executePush(
       store.removeBase(d.key);
       store.removeCommitted(d.key);
       store.removeWorking(d.key);
+      store.removeSeen(d.key);
       store.writeDeletions(store.readDeletions().filter((x) => x.key !== d.key));
       store.writeConflicts(store.readConflicts().filter((c) => c.key !== d.key));
     }
@@ -246,7 +257,12 @@ export async function executePush(
     store.removeCommitted(refId);
     store.removeWorking(refId);
     const fresh = await tryFetch(ctx, key);
-    if (fresh) store.writeBase(fresh);
+    if (fresh) {
+      store.writeBase(fresh);
+      // The user approved the full create card — the new ticket enters their known
+      // state now instead of resurfacing in jt changes as "new".
+      store.writeSeen(key, fresh.ticket);
+    }
     if (fullyApplied && untouchedSinceCommit && fresh) {
       store.writeWorking(key, fresh.ticket);
     } else {
@@ -265,23 +281,52 @@ export async function executePush(
       }
     }
   }
-  // Any other working file may reference the newly created keys.
+  // Any other working or committed file may reference the newly created keys.
+  // Committed copies matter after a partial failure: the remaining delta stays
+  // committed, and a stale @ref there would no longer compile (its creation is
+  // no longer pending).
   if (refMap.size > 0) {
     for (const wf of store.listWorking()) {
       const t = structuredClone(wf.ticket);
       if (rewriteRefs(t, refMap)) store.writeWorking(wf.id, t);
     }
+    for (const id of store.listCommittedIds()) {
+      const c = store.readCommitted(id);
+      if (!c) continue;
+      const t = structuredClone(c.ticket);
+      if (rewriteRefs(t, refMap)) store.writeCommitted(id, serializeTicket(t));
+    }
   }
 
   // Link/unlink ops mutate BOTH endpoints remotely — the partner issue needs a
-  // refetch too, even though it had no ops of its own.
+  // refetch too, even though it had no ops of its own. Collect the approved edges
+  // per endpoint while we're here: the human approved each edge on the review page,
+  // so both sides absorb it into seen (below) rather than re-reporting it as news.
   const partnerKeys = new Set<string>();
+  const approvedEdges = new Map<string, { added: LinkEntry[]; removed: LinkEntry[] }>();
+  const edgesOf = (key: string) => {
+    let e = approvedEdges.get(key);
+    if (!e) approvedEdges.set(key, e = { added: [], removed: [] });
+    return e;
+  };
   for (const rec of journal.ops) {
     if (!rec.ok) continue;
-    const body = rec.body as { inwardIssue?: { key: string }; outwardIssue?: { key: string } };
+    const body = rec.body as {
+      type?: { name: string };
+      inwardIssue?: { key: string };
+      outwardIssue?: { key: string };
+    };
     if (rec.path.endsWith("/issueLink") && body) {
       for (const k of [body.inwardIssue?.key, body.outwardIssue?.key]) {
         if (k && !k.startsWith("@")) partnerKeys.add(k);
+      }
+      const lt = ctx.meta.linkTypes.find((l) => l.name === body.type?.name);
+      const inKey = body.inwardIssue?.key;
+      const outKey = body.outwardIssue?.key;
+      if (lt && inKey && outKey) {
+        // {inwardIssue: A, outwardIssue: B} renders as "A <outward> B" / "B <inward> A".
+        edgesOf(inKey).added.push({ type: lt.outward, to: outKey });
+        edgesOf(outKey).added.push({ type: lt.inward, to: inKey });
       }
     }
     const unlinkOp = ops.find((o) => o.kind === "unlink" && o.path === rec.path);
@@ -290,14 +335,21 @@ export async function executePush(
       const entry = Object.entries(base?.raw.linkIds ?? {}).find(([, id]) =>
         rec.path.endsWith(`/issueLink/${id}`)
       );
-      if (entry) partnerKeys.add(entry[0].split("|")[1]);
+      if (entry) {
+        const [phrase, to] = entry[0].split("|");
+        partnerKeys.add(to);
+        edgesOf(unlinkOp.issue).removed.push({ type: phrase, to });
+        const inverse = inverseLinkPhrase(ctx.meta, phrase);
+        if (inverse !== null) edgesOf(to).removed.push({ type: inverse, to: unlinkOp.issue });
+      }
     }
   }
 
   // Existing tickets that had ops: advance base, clear/trim committed, refresh working.
   const settledKeys = [...opOutcomes.keys()].filter((id) => !id.startsWith("@"));
   for (const key of settledKeys) {
-    if (!store.readBase(key)) continue; // deleted above
+    const oldBase = store.readBase(key);
+    if (!oldBase) continue; // deleted above
     const o = opOutcomes.get(key)!;
     if (o.ok === 0) continue; // nothing landed; local state still accurate
     const committed = store.readCommitted(key);
@@ -309,6 +361,7 @@ export async function executePush(
       continue;
     }
     store.writeBase(fresh);
+    advanceSeen(store, key, oldBase.ticket, fresh.ticket, committed?.ticket ?? null, posted);
     if (o.failed === 0) {
       store.removeCommitted(key);
       if (!working || (committed && working.bytes === committed.bytes)) {
@@ -343,6 +396,12 @@ export async function executePush(
     if (fresh) integrateFetched(store, fresh);
   }
 
+  // Every endpoint of an approved link/unlink absorbs exactly that edge into seen —
+  // including partners and tickets whose broader field advance was held back.
+  for (const [key, delta] of approvedEdges) {
+    absorbApprovedEdges(store, key, delta);
+  }
+
   // Tickets that drained out of the changeset leave the commit chain.
   const committedNow = new Set(store.listCommittedIds());
   const committedDeletions = new Set(
@@ -369,6 +428,87 @@ async function tryFetch(ctx: PushContext, key: string): Promise<BaseEntry | null
   } catch {
     return null;
   }
+}
+
+/**
+ * A push is knowledge: the human stared at exactly this delta on the review page and
+ * approved it, so absorb it into the seen layer rather than re-reporting it as
+ * upstream news. 3-way and per-field, like pull's rebase: a field advances only where
+ * seen agreed with the pre-push base (no unacked remote news pending on it) AND the
+ * fresh remote value is exactly the approved one (remote side effects — automations,
+ * value normalization — stay news). Comments absorb exactly the posted bodies.
+ */
+function advanceSeen(
+  store: Store,
+  key: string,
+  oldBase: Ticket,
+  fresh: Ticket,
+  approved: Ticket | null,
+  postedBodies: string[],
+): void {
+  const seen = store.readSeen(key);
+  if (!seen) return; // never acked — stays outside the user's known state
+  const next = structuredClone(seen.ticket);
+  let changed = false;
+  for (const n of ticketFieldNames(seen.ticket, oldBase, fresh, ...(approved ? [approved] : []))) {
+    if (n === "comments") continue;
+    if (fieldEqual(seen.ticket, fresh, n)) continue; // nothing to absorb
+    if (!fieldEqual(seen.ticket, oldBase, n)) continue; // unacked news — keep reporting it
+    if (!approved || !fieldEqual(fresh, approved, n)) continue; // not the approved value
+    setField(next, n, structuredClone(getField(fresh, n)));
+    changed = true;
+  }
+  const budget = new Map<string, number>();
+  for (const b of postedBodies) budget.set(b, (budget.get(b) ?? 0) + 1);
+  const seenIds = new Set(next.comments.map((c) => c.id).filter(Boolean));
+  for (const c of fresh.comments) {
+    if (c.id && seenIds.has(c.id)) continue;
+    const left = budget.get(c.body) ?? 0;
+    if (left === 0) continue; // someone else's comment — news
+    budget.set(c.body, left - 1);
+    next.comments.push(c);
+    changed = true;
+  }
+  if (changed) {
+    next.updated = fresh.updated;
+    store.writeSeen(key, next);
+  }
+}
+
+/** Apply approved link-edge additions/removals to a ticket's seen entry, if it has one. */
+function absorbApprovedEdges(
+  store: Store,
+  key: string,
+  delta: { added: LinkEntry[]; removed: LinkEntry[] },
+): void {
+  const seen = store.readSeen(key);
+  if (!seen) return;
+  const t = structuredClone(seen.ticket);
+  const edgeKey = (l: LinkEntry) => `${l.type}|${l.to}`;
+  const have = new Set(t.links.map(edgeKey));
+  let changed = false;
+  for (const e of delta.added) {
+    if (have.has(edgeKey(e))) continue;
+    t.links.push({ ...e });
+    have.add(edgeKey(e));
+    changed = true;
+  }
+  const gone = new Set(delta.removed.map(edgeKey));
+  const kept = t.links.filter((l) => !gone.has(edgeKey(l)));
+  if (kept.length !== t.links.length) {
+    t.links = kept;
+    changed = true;
+  }
+  if (changed) store.writeSeen(key, t);
+}
+
+/** The opposite direction phrase of a link type, e.g. "blocks" -> "is blocked by". */
+function inverseLinkPhrase(meta: Meta, phrase: string): string | null {
+  for (const lt of meta.linkTypes) {
+    if (lt.outward.toLowerCase() === phrase.toLowerCase()) return lt.inward;
+    if (lt.inward.toLowerCase() === phrase.toLowerCase()) return lt.outward;
+  }
+  return null;
 }
 
 /**

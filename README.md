@@ -103,8 +103,9 @@ jt changes
 jt changes --ack
 ```
 
-Pulling never advances the acknowledgment baseline. `jt changes --web` provides the
-same report using the user-facing web UI with an Acknowledge button.
+Pulling never advances the acknowledgment baseline. An approved push does, for exactly
+the approved delta — your own pushes do not come back as news. `jt changes --web`
+provides the same report using the user-facing web UI with an Acknowledge button.
 
 ## Creating tickets
 
@@ -116,8 +117,9 @@ jt commit
 jt push
 ```
 
-Pending tickets use `@name` references. After a successful push, `jt` replaces them
-with Jira keys and renames their files.
+Pending tickets use `@name` references — existing tickets may use them too (for
+example, re-parenting a tracked ticket under `@big-epic`). After a successful push,
+`jt` replaces them with Jira keys and renames their files.
 
 ## Scope and safety
 

@@ -53,7 +53,9 @@ jt status
 
 `jt pull` synchronizes Jira and rebases non-overlapping remote edits. `jt changes`
 reports remote changes since the last acknowledgment. Surface non-empty output to the
-user; run `jt changes --ack` only after it has been seen or handled.
+user; run `jt changes --ack` only after it has been seen or handled. Changes the user
+approved on a push review page are recorded as seen automatically and do not reappear
+here.
 
 Use `jt fetch KEY...` when tracking individual tickets rather than a mirror.
 
@@ -148,8 +150,10 @@ jt new my-epic --type Epic --summary "The epic"
 jt new my-story --type Story --parent @my-epic
 ```
 
-Pending creations use `@name` in `parent` and link targets. One push creates parents
-first, replaces references with Jira keys, and renames the files.
+Pending creations use `@name` in `parent` and link targets, from other new tickets and
+from existing ones alike (for example, re-parenting `PROJ-123` under `@my-epic`). One
+push creates the new tickets first, replaces references with Jira keys, and renames the
+files.
 
 ## Conflicts and aliases
 

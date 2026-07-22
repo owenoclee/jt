@@ -173,6 +173,15 @@ export function renderFieldRows(
   return rows.join("\n");
 }
 
+/** Card body for a ticket that left the changeset without being pushed. */
+export function renderWithdrawnCard(context: "commit" | "since"): string {
+  const msg = context === "since"
+    ? "withdrawn since your last review — the proposed change you reviewed is no longer " +
+      "part of the changeset and will not be sent"
+    : "withdrawn — no longer part of the changeset; nothing will be sent for this ticket";
+  return `<div class="withdrawn-card">${msg}</div>`;
+}
+
 /** The diff rows for one changed field (bold name via .chg). */
 function changedRows(e: DiffEntry, refs: RefContext): string[] {
   const rows: string[] = [];
@@ -667,6 +676,7 @@ h3 a.ref:hover { text-decoration: underline; }
 .md code, .comment code { background: var(--card); padding: 1px 4px; border-radius: 4px; }
 .create-card .badge { float: right; }
 .delete-card { background: var(--del-bg); color: var(--del-fg); padding: 10px 14px; border-radius: 6px; }
+.withdrawn-card { color: var(--muted); border: 1px dashed var(--border); border-radius: 6px; padding: 10px 14px; }
 .nochange { color: var(--muted); }
 .frow.warn { color: var(--warn); }
 details.ops { border-top: 1px solid var(--border); padding: 8px 14px; }

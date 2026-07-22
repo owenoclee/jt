@@ -115,7 +115,12 @@ Deno.test("review flow: atomic gate, notes, uncommit reshaping, collapse", async
       assertEquals(store.readWorking("@epic")!.ticket.summary, "The epic");
 
       const outcome = await decideViaHttp(ctx, { decision: "approve", notes: {} }, (html) => {
-        assert(!html.includes("The epic"), "uncommitted tickets must not be on the page");
+        // Uncommitted tickets are not sendable cards, but they do NOT vanish: the
+        // reviewer who asked for the drop sees it recorded as withdrawn.
+        assert(!html.includes(`id="t-@epic"`), "uncommitted tickets must not be sendable cards");
+        assertStringIncludes(html, "Approve &amp; push all 1");
+        assertStringIncludes(html, "withdrawn since your last review");
+        assertStringIncludes(html, "The epic");
         // TST-1 was already seen at the last review and is byte-identical -> collapsed
         assertStringIncludes(html, "unchanged since your last review");
         assertStringIncludes(html, `class="ticket collapsed"`);

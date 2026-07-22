@@ -6,10 +6,16 @@ import {
   snapshotEqual,
   stateAtSeq,
 } from "../chain.ts";
+import { compareTicketIds } from "../keys.ts";
 import { NO_REFS, type RefContext } from "../refs.ts";
 import type { Store } from "../store.ts";
 import type { Config, Ticket } from "../types.ts";
-import { renderTicketDelta, type ReviewPageModel, type TicketSection } from "./html.ts";
+import {
+  renderTicketDelta,
+  renderWithdrawnCard,
+  type ReviewPageModel,
+  type TicketSection,
+} from "./html.ts";
 import type { TicketPlan } from "./plan.ts";
 
 export function buildPageModel(
@@ -71,6 +77,13 @@ export function buildCommitViews(
   const chain = readChain(store);
   return chain.entries.map((entry) => {
     const sections: TicketSection[] = Object.entries(entry.tickets).map(([id, snap]) => {
+      if (snap.kind === "withdrawn") {
+        return {
+          id,
+          summary: `(withdrawn) ${snap.summary}`,
+          html: renderWithdrawnCard("commit"),
+        };
+      }
       const prior = stateAtSeq(chain, id, entry.seq - 1);
       const base = id.startsWith("@") ? null : store.readBase(id);
       const from = snapshotTicket(prior) ?? base?.ticket ?? null;
@@ -109,10 +122,28 @@ export function buildSinceReview(
     const currentSnap = stateAtSeq(chain, id, tipSeq);
     if (snapshotEqual(priorSnap, currentSnap)) continue;
     const base = id.startsWith("@") ? null : store.readBase(id);
-    const from = snapshotTicket(priorSnap) ?? (priorSnap === null ? base?.ticket ?? null : null);
-    const to = currentSnap === null || currentSnap.kind === "deletion" ? null : currentSnap.ticket;
+    // A withdrawn prior means the reviewer last saw this ticket OUT of the changeset —
+    // its re-entry diffs against base, like a ticket entering for the first time.
+    const from = snapshotTicket(priorSnap) ??
+      (priorSnap === null || priorSnap.kind === "withdrawn" ? base?.ticket ?? null : null);
+    const to = currentSnap === null || currentSnap.kind !== "ticket" ? null : currentSnap.ticket;
     const summary = to?.summary ?? from?.summary ?? "";
     sections.push({ id, summary, html: renderTicketDelta(from, to, refs) });
+  }
+
+  // Tickets that LEFT the changeset since the review: chain history, no current plan,
+  // and a withdrawal tombstone at the tip. Shown exactly once — after the next review
+  // the marker moves past the tombstone.
+  const planIds = new Set(ids);
+  const chainIds = [...new Set(chain.entries.flatMap((e) => Object.keys(e.tickets)))]
+    .filter((id) => !planIds.has(id))
+    .sort(compareTicketIds);
+  for (const id of chainIds) {
+    const priorSnap = stateAtSeq(chain, id, marker.lastReviewedSeq);
+    const currentSnap = stateAtSeq(chain, id, tipSeq);
+    if (currentSnap?.kind !== "withdrawn") continue;
+    if (priorSnap === null || priorSnap.kind === "withdrawn") continue; // reviewer never saw it staged
+    sections.push({ id, summary: currentSnap.summary, html: renderWithdrawnCard("since") });
   }
   return sections.length > 0 ? { fromSeq: marker.lastReviewedSeq, sections } : null;
 }

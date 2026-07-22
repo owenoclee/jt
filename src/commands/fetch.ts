@@ -1,5 +1,5 @@
 import { parseArgs } from "@std/cli";
-import { appendChainEntry, type ChainSnapshot, pruneChain } from "../chain.ts";
+import { appendChainEntry, type ChainSnapshot, withdrawFromChain } from "../chain.ts";
 import { localContext, withClient, withMeta } from "../context.ts";
 import { fail } from "../errors.ts";
 import { JiraApiError, type JiraClient } from "../jira/client.ts";
@@ -49,7 +49,11 @@ function integrateWithChain(
   const result = integrateFetched(store, entry);
   const after = store.readCommitted(key);
   if (before !== null && after === null) {
-    pruneChain(store, [key]); // rebase made committed equal base — left the changeset
+    // Rebase made committed equal base: the remote already contains the whole local
+    // delta, so the ticket leaves the changeset — as a withdrawal, not a silent prune.
+    withdrawFromChain(store, "remote", `rebase: remote already matches ${key}`, {
+      [key]: entry.ticket.summary,
+    });
   } else if (after && after.bytes !== before && result.kind === "rebased") {
     rebases.push({
       key,

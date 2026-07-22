@@ -4,7 +4,9 @@
  * jt changes reports upstream news against the seen layer → --ack absorbs it.
  */
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { readChain, writeReviewMarker } from "../src/chain.ts";
 import { cmdChanges } from "../src/commands/changes.ts";
+import { cmdCommit } from "../src/commands/commit.ts";
 import { cmdFetch, cmdPull } from "../src/commands/fetch.ts";
 import { cmdInit } from "../src/commands/init.ts";
 import { cmdStatus } from "../src/commands/local.ts";
@@ -210,6 +212,23 @@ Deno.test("mirror: clone, incremental pull, changes/ack lifecycle", async (t) =>
       assert(store.readWorking(other.key));
       await cmdPull(); // must not drop it: never was in scope
       assert(store.readWorking(other.key), "ad-hoc ticket survives mirror pulls");
+    });
+
+    await t.step("remote absorbing a staged edit records a withdrawal for the reviewer", async () => {
+      const wf = store.readWorking("TST-1")!;
+      const labels = [...wf.ticket.labels, "shipit"];
+      store.writeWorking("TST-1", { ...wf.ticket, labels });
+      cmdCommit(["TST-1", "-m", "add shipit"]);
+      writeReviewMarker(store, readChain(store).entries.at(-1)!.seq); // the human reviewed it
+      mock.issues.get("TST-1")!.labels = labels; // a teammate makes the same change in Jira
+      mock.touch("TST-1");
+
+      await cmdPull();
+      assertEquals(store.listCommittedIds(), [], "delta drained — nothing left to push");
+      const tip = readChain(store).entries.at(-1)!;
+      assertEquals(tip.author, "remote");
+      assertEquals(tip.tickets["TST-1"].kind, "withdrawn");
+      assertStringIncludes(tip.note, "remote already matches TST-1");
     });
   } finally {
     console.log = origLog;

@@ -89,8 +89,9 @@ opener if available. Never fetch it, inspect it, or interact with it using brows
 automation: approval belongs to the human.
 
 If the user requests edits, update the working file and commit another round. To omit
-a ticket while keeping its working edits, run `jt uncommit ID`. To discard working
-edits, run `jt restore ID`.
+a ticket while keeping its working edits, run `jt uncommit ID`; the next review page
+marks it withdrawn rather than silently dropping it. To discard working edits, run
+`jt restore ID`.
 
 ## Hard rules
 

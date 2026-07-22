@@ -2,7 +2,7 @@
 import { parseArgs } from "@std/cli";
 import { basename, join } from "@std/path";
 import { ticketsEqual } from "../canonical.ts";
-import { pruneChain } from "../chain.ts";
+import { pruneChain, withdrawFromChain } from "../chain.ts";
 import { renderPage, renderTicketCard, renderTicketDelta, type ReviewPageModel } from "../review/html.ts";
 import { buildCommitViews, buildSinceReview } from "../review/model.ts";
 import { localContext, withClient, withMeta } from "../context.ts";
@@ -298,6 +298,7 @@ export function cmdNew(argv: string[]): void {
 export function cmdUncommit(argv: string[]): void {
   if (argv.length === 0) fail("usage: jt uncommit <KEY|@name...>  (keeps your edits; removes from what push will send)");
   const { store } = localContext();
+  const withdrawn: Record<string, string> = {};
   for (const raw of argv) {
     const id = raw.startsWith("@") ? raw : raw.toUpperCase();
     const deletions = store.readDeletions();
@@ -305,18 +306,20 @@ export function cmdUncommit(argv: string[]): void {
     if (deletion) {
       deletion.committed = false;
       store.writeDeletions(deletions);
-      pruneChain(store, [id]);
+      withdrawn[id] = deletion.summary;
       console.log(`uncommitted ${bold(id)} ${dim("(deletion intent kept, no longer staged for push)")}`);
       continue;
     }
-    if (!store.readCommitted(id)) {
+    const committed = store.readCommitted(id);
+    if (!committed) {
       console.log(`${id}: nothing committed`);
       continue;
     }
     store.removeCommitted(id);
-    pruneChain(store, [id]);
+    withdrawn[id] = committed.ticket.summary;
     console.log(`uncommitted ${bold(id)} ${dim("(working edits kept — see jt status)")}`);
   }
+  withdrawFromChain(store, "agent", `uncommit ${Object.keys(withdrawn).join(", ")}`, withdrawn);
 }
 
 /** jt restore: `git checkout -- <file>` — reset working file to committed-if-staged else base. */
@@ -333,7 +336,13 @@ export function cmdRestore(argv: string[]): void {
       const base = store.readBase(id);
       if (!base) fail(`${id}: deletion staged but no base snapshot — jt untrack instead`);
       store.writeDeletions(deletions.filter((d) => d.key !== id));
-      pruneChain(store, [id]);
+      if (deletion.committed) {
+        withdrawFromChain(store, "agent", `restore ${id} (deletion undone)`, {
+          [id]: deletion.summary,
+        });
+      } else {
+        pruneChain(store, [id]);
+      }
       store.writeWorking(id, base.ticket);
       console.log(`restored ${bold(id)} ${dim("(deletion undone; working file back from base)")}`);
       continue;
@@ -379,6 +388,10 @@ export function cmdUntrack(argv: string[]): void {
   const { store } = localContext();
   for (const raw of argv) {
     const id = raw.startsWith("@") ? raw : raw.toUpperCase();
+    // Untracking something that was staged for push shrinks the changeset — record a
+    // withdrawal tombstone; plain cleanup of unstaged tickets just prunes.
+    const committed = store.readCommitted(id);
+    const committedDeletion = store.readDeletions().find((d) => d.key === id && d.committed);
     store.removeWorking(id);
     store.removeCommitted(id);
     if (!id.startsWith("@")) {
@@ -387,7 +400,13 @@ export function cmdUntrack(argv: string[]): void {
       store.writeDeletions(store.readDeletions().filter((d) => d.key !== id));
       store.writeConflicts(store.readConflicts().filter((c) => c.key !== id));
     }
-    pruneChain(store, [id]);
+    if (committed || committedDeletion) {
+      withdrawFromChain(store, "agent", `untrack ${id}`, {
+        [id]: committed?.ticket.summary ?? committedDeletion!.summary,
+      });
+    } else {
+      pruneChain(store, [id]);
+    }
     console.log(`untracked ${id} ${dim("(local only — Jira is untouched)")}`);
   }
 }

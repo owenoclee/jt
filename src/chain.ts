@@ -14,7 +14,9 @@ import type { Ticket } from "./types.ts";
 
 export type ChainSnapshot =
   | { kind: "ticket"; ticket: Ticket }
-  | { kind: "deletion"; summary: string };
+  | { kind: "deletion"; summary: string }
+  /** The ticket left the changeset without being pushed (uncommit, untrack, rebase drain). */
+  | { kind: "withdrawn"; summary: string };
 
 export interface ChainEntry {
   seq: number;
@@ -84,6 +86,40 @@ export function appendChainEntry(
 }
 
 /**
+ * Record tickets leaving the changeset WITHOUT being pushed (jt uncommit, jt untrack,
+ * a pull rebase that drained the whole delta). Unlike pruneChain — which erases a
+ * ticket from history and is reserved for tickets whose changes actually landed — a
+ * withdrawal appends a tombstone entry, so the next review page can say "this left
+ * the proposal" instead of silently forgetting the ticket was ever up for edits.
+ *
+ * Tickets that never entered the chain get no tombstone, and if nobody has reviewed
+ * this changeset yet (no marker) a drained chain still resets: tombstones exist for
+ * reviewers, not for drafts.
+ */
+export function withdrawFromChain(
+  store: Store,
+  author: "agent" | "remote",
+  note: string,
+  tickets: Record<string, string>,
+): void {
+  const chain = readChain(store);
+  const touched = Object.keys(tickets).filter((id) =>
+    chain.entries.some((e) => e.tickets[id] !== undefined)
+  );
+  if (touched.length > 0) {
+    appendChainEntry(
+      store,
+      author,
+      note,
+      Object.fromEntries(
+        touched.map((id) => [id, { kind: "withdrawn", summary: tickets[id] } as ChainSnapshot]),
+      ),
+    );
+  }
+  if (readReviewMarker(store) === null && changesetEmpty(store)) resetChain(store);
+}
+
+/**
  * Remove pushed/abandoned tickets from the chain. Entries left empty disappear;
  * when the whole changeset has drained, the chain and review marker reset.
  */
@@ -150,6 +186,6 @@ export function currentSnapshot(store: Store, id: string): ChainSnapshot | null 
 export function snapshotEqual(a: ChainSnapshot | null, b: ChainSnapshot | null): boolean {
   if (a === null || b === null) return a === b;
   if (a.kind !== b.kind) return false;
-  if (a.kind === "deletion" || b.kind === "deletion") return true;
+  if (a.kind !== "ticket" || b.kind !== "ticket") return true;
   return serializeTicket(a.ticket) === serializeTicket(b.ticket);
 }

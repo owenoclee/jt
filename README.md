@@ -65,9 +65,10 @@ jt push
 - **Approve & push** sends the whole changeset exactly as shown.
 - **Request changes** sends nothing and returns per-ticket notes.
 
-Each card also lists the ticket's unchanged fields (epic, labels, sprint, …) as muted
-context below the diff; the ⚙ **fields** control picks which ones appear (description
-is off by default).
+Each card lists the ticket's fields in one stable order — changed fields show their
+diff with a bold name, unchanged ones (epic, labels, sprint, …) appear as muted
+context in place; the ⚙ **fields** control picks which unchanged fields appear
+(description is off by default).
 
 Use `jt push --dry-run` to print the compiled API operations (rich-text bodies elided;
 `--full` for the raw ADF JSON) without serving a page or

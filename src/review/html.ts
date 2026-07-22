@@ -5,7 +5,7 @@
  * and the single POST that reports them.
  */
 import { marked } from "marked";
-import { diffTickets } from "../diff.ts";
+import { type DiffEntry, diffTickets } from "../diff.ts";
 import { lineDiff } from "../diff.ts";
 import { NO_REFS, type RefContext } from "../refs.ts";
 import type { Ticket } from "../types.ts";
@@ -85,141 +85,167 @@ export function renderTicketDelta(
   if (!from && to) return renderTicketCard(to, "create", refs);
   if (from && !to) {
     return `<div class="delete-card">staged deletion of <b>${escapeHtml(from.summary)}</b></div>` +
-      renderContextRows(from, new Set(), refs);
+      renderFieldRows(from, [], refs);
   }
   const entries = diffTickets(from!, to!);
   if (entries.length === 0) return `<div class="nochange">no changes</div>`;
-  const rows: string[] = [];
-  for (const e of entries) {
-    switch (e.kind) {
-      case "scalar": {
-        const val = (v: unknown) =>
-          e.field === "parent" && typeof v === "string" ? refHtml(v, refs) : fmt(v);
-        rows.push(
-          `<div class="frow"><span class="fname">${escapeHtml(e.field)}</span>` +
-            `<span class="old">${val(e.from)}</span><span class="arrow">→</span>` +
-            `<span class="new">${val(e.to)}</span></div>`,
-        );
-        break;
-      }
-      case "set": {
-        const chips = [
-          ...e.added.map((l) => `<span class="chip add">+${escapeHtml(l)}</span>`),
-          ...e.removed.map((l) => `<span class="chip del">−${escapeHtml(l)}</span>`),
-        ].join(" ");
-        rows.push(`<div class="frow"><span class="fname">${escapeHtml(e.field)}</span>${chips}</div>`);
-        break;
-      }
-      case "links":
-        for (const l of e.added) {
-          rows.push(
-            `<div class="frow"><span class="fname">links</span><span class="chip add">+ ${
-              escapeHtml(l.type)
-            } ${refHtml(l.to, refs)}</span></div>`,
-          );
-        }
-        for (const l of e.removed) {
-          rows.push(
-            `<div class="frow"><span class="fname">links</span><span class="chip del">− ${
-              escapeHtml(l.type)
-            } ${refHtml(l.to, refs)}</span></div>`,
-          );
-        }
-        break;
-      case "comments":
-        for (const c of e.added) {
-          rows.push(
-            `<div class="frow"><span class="fname">comment</span>` +
-              `<div class="comment new-comment"><div class="comment-tag">new — will be posted</div>${
-                mdToHtml(c.body)
-              }</div></div>`,
-          );
-        }
-        for (const c of e.editedExisting) {
-          rows.push(
-            `<div class="frow warn">existing comment ${escapeHtml(c.id ?? "?")} edited — unsupported</div>`,
-          );
-        }
-        for (const c of e.removedExisting) {
-          rows.push(
-            `<div class="frow warn">existing comment ${escapeHtml(c.id ?? "?")} removed — unsupported</div>`,
-          );
-        }
-        break;
-      case "text": {
-        const hunks = lineDiff(e.from ?? "", e.to ?? "");
-        const lines = hunks.map((h) =>
-          h.lines.map((l) => {
-            const cls = l.op === "+" ? "dl-add" : l.op === "-" ? "dl-del" : "dl-ctx";
-            return `<div class="dl ${cls}"><span class="dl-op">${l.op}</span>${escapeHtml(l.text) || "&nbsp;"}</div>`;
-          }).join("")
-        ).join(`<div class="dl dl-sep">⋮</div>`);
-        rows.push(
-          `<div class="frow"><span class="fname">description</span><div class="descdiff">${lines}</div></div>`,
-        );
-        break;
-      }
-    }
-  }
-  const changed = new Set<string>(entries.map((e) => e.field));
-  return rows.join("\n") + renderContextRows(to!, changed, refs);
+  return renderFieldRows(to!, entries, refs);
 }
 
 /**
- * Muted rows for the fields a delta does NOT touch — the rest of the ticket (its Epic,
- * labels, sprint, …) as glanceable context. Every row carries data-ctx-field so the
- * page's ⚙ panel can show/hide unchanged fields globally and per field; the whole
- * block stays hidden until that script runs.
+ * One flat field list per card, always in the same canonical order — changed fields
+ * render their diff with a bold name, untouched ones render as muted context rows.
+ * Interleaving in a fixed order (rather than a changed/unchanged split) lets a
+ * reviewer learn where each field lives on the card. Context rows carry
+ * data-ctx-field for the ⚙ panel and stay hidden until its script applies the saved
+ * preferences.
  */
-export function renderContextRows(
+export function renderFieldRows(
   t: Ticket,
-  changed: Set<string>,
+  entries: DiffEntry[],
   refs: RefContext = NO_REFS,
 ): string {
+  const byField = new Map<string, DiffEntry>(entries.map((e) => [e.field, e]));
   const rows: string[] = [];
   const none = (label = "none") => `<i class="none">${label}</i>`;
-  const row = (field: string, html: string, block = false) =>
+  const ctx = (field: string, html: string, block = false) =>
     rows.push(
       `<div class="frow ctx" data-ctx-field="${escapeHtml(field)}">` +
         `<span class="fname">${escapeHtml(field)}</span>` +
         (block ? html : `<span class="ctxval">${html}</span>`) +
         `</div>`,
     );
-  if (!changed.has("type")) row("type", escapeHtml(t.type));
-  if (!changed.has("status") && t.status) row("status", escapeHtml(t.status));
-  if (!changed.has("labels")) {
-    row(
+  // Renders the diff rows at this field's canonical slot; reports whether it was changed.
+  const changed = (field: string): boolean => {
+    const e = byField.get(field);
+    if (e) rows.push(...changedRows(e, refs));
+    return e !== undefined;
+  };
+
+  changed("project");
+  changed("summary"); // unchanged summary lives in the card header
+  if (!changed("type")) ctx("type", escapeHtml(t.type));
+  if (!changed("status") && t.status) ctx("status", escapeHtml(t.status));
+  if (!changed("labels")) {
+    ctx(
       "labels",
       t.labels.length
         ? t.labels.map((l) => `<span class="chip">${escapeHtml(l)}</span>`).join(" ")
         : none(),
     );
   }
-  if (!changed.has("parent")) row("parent", t.parent ? refHtml(t.parent, refs) : none());
-  if (!changed.has("sprint")) {
-    row("sprint", t.sprint === null ? none("backlog") : escapeHtml(String(t.sprint)));
+  if (!changed("parent")) ctx("parent", t.parent ? refHtml(t.parent, refs) : none());
+  if (!changed("sprint")) {
+    ctx("sprint", t.sprint === null ? none("backlog") : escapeHtml(String(t.sprint)));
   }
-  if (!changed.has("assignee")) {
-    row("assignee", t.assignee ? escapeHtml(t.assignee) : none("unassigned"));
+  if (!changed("assignee")) {
+    ctx("assignee", t.assignee ? escapeHtml(t.assignee) : none("unassigned"));
   }
-  if (!changed.has("priority")) row("priority", t.priority ? escapeHtml(t.priority) : none());
-  for (const [k, v] of Object.entries(t.fields)) {
-    if (changed.has(`fields.${k}`)) continue;
-    row(k, v === null ? none() : escapeHtml(typeof v === "string" ? v : JSON.stringify(v)));
+  if (!changed("priority")) ctx("priority", t.priority ? escapeHtml(t.priority) : none());
+  const aliases = new Set([
+    ...Object.keys(t.fields),
+    ...[...byField.keys()]
+      .filter((f) => f.startsWith("fields."))
+      .map((f) => f.slice("fields.".length)),
+  ]);
+  for (const alias of [...aliases].sort()) {
+    if (changed(`fields.${alias}`)) continue;
+    const v = t.fields[alias];
+    ctx(
+      alias,
+      v === null || v === undefined
+        ? none()
+        : escapeHtml(typeof v === "string" ? v : JSON.stringify(v)),
+    );
   }
-  if (!changed.has("links") && t.links.length) {
-    row(
+  if (!changed("links") && t.links.length) {
+    ctx(
       "links",
       t.links
         .map((l) => `<span class="chip">${escapeHtml(l.type)} ${refHtml(l.to, refs)}</span>`)
         .join(" "),
     );
   }
-  if (!changed.has("description") && t.description !== null) {
-    row("description", `<div class="desc md ctxval">${mdToHtml(t.description)}</div>`, true);
+  if (!changed("description") && t.description !== null) {
+    ctx("description", `<div class="desc md ctxval">${mdToHtml(t.description)}</div>`, true);
   }
-  if (rows.length === 0) return "";
-  return `<div class="ctx-block"><div class="ctx-head">unchanged fields</div>${rows.join("")}</div>`;
+  changed("comments"); // existing comments are never context — only diffs render
+  return rows.join("\n");
+}
+
+/** The diff rows for one changed field (bold name via .chg). */
+function changedRows(e: DiffEntry, refs: RefContext): string[] {
+  const rows: string[] = [];
+  const display = e.field.startsWith("fields.") ? e.field.slice("fields.".length) : e.field;
+  const name = `<span class="fname">${escapeHtml(display)}</span>`;
+  switch (e.kind) {
+    case "scalar": {
+      const val = (v: unknown) =>
+        e.field === "parent" && typeof v === "string" ? refHtml(v, refs) : fmt(v);
+      rows.push(
+        `<div class="frow chg">${name}` +
+          `<span class="old">${val(e.from)}</span><span class="arrow">→</span>` +
+          `<span class="new">${val(e.to)}</span></div>`,
+      );
+      break;
+    }
+    case "set": {
+      const chips = [
+        ...e.added.map((l) => `<span class="chip add">+${escapeHtml(l)}</span>`),
+        ...e.removed.map((l) => `<span class="chip del">−${escapeHtml(l)}</span>`),
+      ].join(" ");
+      rows.push(`<div class="frow chg">${name}${chips}</div>`);
+      break;
+    }
+    case "links":
+      for (const l of e.added) {
+        rows.push(
+          `<div class="frow chg"><span class="fname">links</span><span class="chip add">+ ${
+            escapeHtml(l.type)
+          } ${refHtml(l.to, refs)}</span></div>`,
+        );
+      }
+      for (const l of e.removed) {
+        rows.push(
+          `<div class="frow chg"><span class="fname">links</span><span class="chip del">− ${
+            escapeHtml(l.type)
+          } ${refHtml(l.to, refs)}</span></div>`,
+        );
+      }
+      break;
+    case "comments":
+      for (const c of e.added) {
+        rows.push(
+          `<div class="frow chg"><span class="fname">comment</span>` +
+            `<div class="comment new-comment"><div class="comment-tag">new — will be posted</div>${
+              mdToHtml(c.body)
+            }</div></div>`,
+        );
+      }
+      for (const c of e.editedExisting) {
+        rows.push(
+          `<div class="frow warn">existing comment ${escapeHtml(c.id ?? "?")} edited — unsupported</div>`,
+        );
+      }
+      for (const c of e.removedExisting) {
+        rows.push(
+          `<div class="frow warn">existing comment ${escapeHtml(c.id ?? "?")} removed — unsupported</div>`,
+        );
+      }
+      break;
+    case "text": {
+      const hunks = lineDiff(e.from ?? "", e.to ?? "");
+      const lines = hunks.map((h) =>
+        h.lines.map((l) => {
+          const cls = l.op === "+" ? "dl-add" : l.op === "-" ? "dl-del" : "dl-ctx";
+          return `<div class="dl ${cls}"><span class="dl-op">${l.op}</span>${escapeHtml(l.text) || "&nbsp;"}</div>`;
+        }).join("")
+      ).join(`<div class="dl dl-sep">⋮</div>`);
+      rows.push(`<div class="frow chg">${name}<div class="descdiff">${lines}</div></div>`);
+      break;
+    }
+  }
+  return rows;
 }
 
 export function renderTicketCard(t: Ticket, badge: string, refs: RefContext = NO_REFS): string {
@@ -464,11 +490,6 @@ export function renderPage(model: ReviewPageModel): string {
         document.querySelectorAll('.frow.ctx').forEach((el) => {
           el.classList.toggle('ctx-off', prefs.hidden.includes(el.dataset.ctxField));
         });
-        document.querySelectorAll('.ctx-block').forEach((b) => {
-          const anyVisible = [...b.querySelectorAll('.frow.ctx')]
-            .some((el) => !el.classList.contains('ctx-off'));
-          b.classList.toggle('empty', !anyVisible);
-        });
         try { localStorage.setItem('jt-ctx-fields', JSON.stringify(prefs)); } catch {}
       }
       gear.addEventListener('click', () => { cfg.hidden = !cfg.hidden; });
@@ -613,13 +634,11 @@ section.ticket.collapsed > header { border-bottom: none; }
 #fieldcfg label { display: flex; gap: 6px; align-items: center; cursor: pointer; white-space: nowrap; }
 #fieldcfg > label { font-weight: 600; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
 #cfgfields { display: flex; flex-direction: column; gap: 2px; max-height: 40vh; overflow-y: auto; }
-.ctx-block { display: none; margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--border); }
-body.show-ctx .ctx-block { display: block; }
-body.show-ctx .ctx-block.empty { display: none; }
-.ctx-head { font-size: 10px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
-  color: var(--muted); margin-bottom: 2px; }
+.frow.chg .fname { font-weight: 700; color: var(--fg); }
+.frow.ctx { display: none; }
+body.show-ctx .frow.ctx { display: flex; }
+body.show-ctx .frow.ctx.ctx-off { display: none; }
 .frow.ctx, .frow.ctx .ctxval { color: var(--muted); }
-.frow.ctx.ctx-off { display: none; }
 .frow.ctx .chip { opacity: .85; }
 .frow.ctx .desc.md { flex-basis: 100%; margin-top: 4px; }
 a.ref { color: inherit; text-decoration: underline dotted; text-underline-offset: 2px; }

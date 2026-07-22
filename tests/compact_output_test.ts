@@ -4,7 +4,7 @@
  * --ack absorbs without reprinting the diffs, jt log folds successful ops,
  * and the web pages carry unchanged-field context rows behind the ⚙ panel.
  */
-import { assert, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { cmdChanges } from "../src/commands/changes.ts";
 import { cmdInit } from "../src/commands/init.ts";
 import { renderJournalEntry } from "../src/render/render.ts";
@@ -110,10 +110,10 @@ Deno.test("web pages: unchanged-field context rows and the ⚙ panel", async (t)
     fields: { "Story Points": 5 },
   });
 
-  await t.step("update delta appends muted context rows for untouched fields", () => {
+  await t.step("update delta interleaves muted context rows for untouched fields", () => {
     const to = { ...from, summary: "One (renamed)" };
     const html = renderTicketDelta(from, to);
-    assertStringIncludes(html, "ctx-block");
+    assertStringIncludes(html, 'class="frow chg"');
     assertStringIncludes(html, 'data-ctx-field="labels"');
     assertStringIncludes(html, 'data-ctx-field="parent"');
     assertStringIncludes(html, 'data-ctx-field="Story Points"');
@@ -121,11 +121,23 @@ Deno.test("web pages: unchanged-field context rows and the ⚙ panel", async (t)
     assert(!html.includes('data-ctx-field="summary"'), "changed fields are not context");
   });
 
-  await t.step("changed fields drop out of the context block", () => {
+  await t.step("changed fields render in place of their context row", () => {
     const to = { ...from, labels: ["api", "hot"] };
     const html = renderTicketDelta(from, to);
     assert(!html.includes('data-ctx-field="labels"'));
     assertStringIncludes(html, 'data-ctx-field="parent"');
+  });
+
+  await t.step("field order is identical no matter which fields changed", () => {
+    const fieldOrder = (html: string) =>
+      [...html.matchAll(/<span class="fname">([^<]+)<\/span>/g)]
+        .map((m) => m[1])
+        .filter((f) => f !== "summary");
+    const summaryChanged = renderTicketDelta(from, { ...from, summary: "x" });
+    const labelsChanged = renderTicketDelta(from, { ...from, labels: ["api", "hot"] });
+    const sprintChanged = renderTicketDelta(from, { ...from, sprint: "Sprint 43" });
+    assertEquals(fieldOrder(labelsChanged), fieldOrder(summaryChanged));
+    assertEquals(fieldOrder(sprintChanged), fieldOrder(summaryChanged));
   });
 
   await t.step("delete delta shows the whole ticket as context", () => {

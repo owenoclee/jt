@@ -17,7 +17,7 @@ import { bold, dim, green, red } from "../render/colors.ts";
 import { renderDiffEntries } from "../render/render.ts";
 import {
   escapeHtml,
-  renderContextRows,
+  renderFieldRows,
   renderPage,
   renderTicketCard,
   renderTicketDelta,
@@ -175,7 +175,7 @@ function changesWeb(
         break;
       case "gone":
         diffHtml = `<div class="delete-card">deleted or left the board since your last ack</div>` +
-          renderContextRows(it.seen!, new Set(), refs);
+          renderFieldRows(it.seen!, [], refs);
         break;
       case "conflict":
         diffHtml = `<div class="conflict-card">remote changed <b>${

@@ -35,7 +35,10 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
     jt pull [--full]        sync the mirror (sync.jql in config): new, changed and deleted
                             tickets flow in; 3-way rebase, conflicts flagged
     jt changes [KEY...]     upstream edits since your last ack: new / changed / gone
-    jt changes --ack        absorb them — records current remote state as seen
+                            (compact: description edits show as ±line counts — --full
+                            prints the line diffs)
+    jt changes --ack        absorb them — records current remote state as seen; prints
+                            counts only, never reprints the diffs
     jt changes --web [--timeout SECS]
                             the same news as a glanceable page (purple = informational,
                             nothing sent); its Acknowledge button records the ack
@@ -46,7 +49,7 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
     jt diff --web           render the diff as a PR-style page (prints the file path)
     jt show ID [--base|--committed]
     jt show --web [ID...]   read-only workspace browser: rendered ticket cards
-    jt log [--all]          push journal
+    jt log [--all] [--full] push journal (compact; --full lists every executed op)
 
   write (local-safe)
     jt new NAME [--type T] [--summary S] [--parent KEY|@name]
@@ -65,7 +68,8 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
                             sent; per-ticket notes returned). Prints the URL — there is
                             no headless push.
                             exit 0 pushed · 2 changes requested · 1 timeout/stale
-    jt push --dry-run       print the compiled API ops and stop (nothing served or sent)
+    jt push --dry-run       print the compiled API ops and stop (nothing served or sent;
+                            ADF bodies elided — add --full for the raw JSON)
 
   agent docs: jt schema   (ticket file JSON Schema) · see SKILL.md
 `;

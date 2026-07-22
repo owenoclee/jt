@@ -17,6 +17,7 @@ import { bold, dim, green, red } from "../render/colors.ts";
 import { renderDiffEntries } from "../render/render.ts";
 import {
   escapeHtml,
+  renderFieldRows,
   renderPage,
   renderTicketCard,
   renderTicketDelta,
@@ -43,7 +44,7 @@ interface ChangeItem {
 }
 
 export function cmdChanges(argv: string[], webOpts: ChangesWebOptions = {}): void | Promise<void> {
-  const args = parseArgs(argv, { boolean: ["ack", "web"], string: ["timeout"] });
+  const args = parseArgs(argv, { boolean: ["ack", "web", "full"], string: ["timeout"] });
   if (args.ack && args.web) {
     fail("--ack and --web are mutually exclusive — the web page has an Acknowledge button");
   }
@@ -95,6 +96,20 @@ export function cmdChanges(argv: string[], webOpts: ChangesWebOptions = {}): voi
   const ackKeys = filter.length ? keys : undefined;
   if (args.web) return changesWeb(ctx, items, ackKeys, webOpts, args.timeout);
 
+  const added = items.filter((i) => i.kind === "new").length;
+  const gone = items.filter((i) => i.kind === "gone").length;
+  const changed = items.length - added - gone;
+  const countLine = `${added} new · ${changed} changed · ${gone} gone`;
+
+  // --ack absorbs without reprinting: the news was already surfaced by a plain
+  // jt changes (or the --web page), so a second copy is pure noise.
+  if (args.ack) {
+    if (items.length > 0) console.log(dim(`absorbed: ${countLine}`));
+    store.ackSeen(ackKeys);
+    console.log(dim(filter.length ? `acknowledged: ${keys.join(", ")}` : "acknowledged — all caught up"));
+    return;
+  }
+
   const refs = makeRefContext(store, ctx.ws.config);
   const sections = items.map((it) => {
     switch (it.kind) {
@@ -108,7 +123,9 @@ export function cmdChanges(argv: string[], webOpts: ChangesWebOptions = {}): voi
       case "gone":
         return `${red("gone    ")}  ${bold(it.key)}  ${it.seen!.summary}  ${dim("(deleted or left the board)")}`;
       case "changed":
-        return renderDiffEntries(it.key, it.base!.summary, it.entries, refs);
+        return renderDiffEntries(it.key, it.base!.summary, it.entries, refs, {
+          compactText: !args.full,
+        });
     }
   });
 
@@ -119,22 +136,16 @@ export function cmdChanges(argv: string[], webOpts: ChangesWebOptions = {}): voi
         : "no upstream changes since your last ack",
     );
   } else {
-    const added = items.filter((i) => i.kind === "new").length;
-    const gone = items.filter((i) => i.kind === "gone").length;
-    const changed = items.length - added - gone;
+    const elided = !args.full && items.some((i) => i.entries.some((e) => e.kind === "text"));
     console.log(sections.join("\n\n"));
     console.log("");
     console.log(
       dim(
-        `${added} new · ${changed} changed · ${gone} gone since your last ack` +
-          (args.ack ? "" : " — jt changes --web to show the user · --ack when absorbed"),
+        `${countLine} since your last ack — ` +
+          (elided ? "jt changes --full for description diffs · " : "") +
+          "--web to show the user · --ack when absorbed",
       ),
     );
-  }
-
-  if (args.ack) {
-    store.ackSeen(ackKeys);
-    console.log(dim(filter.length ? `acknowledged: ${keys.join(", ")}` : "acknowledged — all caught up"));
   }
 }
 
@@ -163,7 +174,8 @@ function changesWeb(
         diffHtml = renderTicketCard(it.base!, "new", refs);
         break;
       case "gone":
-        diffHtml = `<div class="delete-card">deleted or left the board since your last ack</div>`;
+        diffHtml = `<div class="delete-card">deleted or left the board since your last ack</div>` +
+          renderFieldRows(it.seen!, [], refs);
         break;
       case "conflict":
         diffHtml = `<div class="conflict-card">remote changed <b>${

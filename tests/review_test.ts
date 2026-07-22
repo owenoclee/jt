@@ -119,6 +119,9 @@ Deno.test("review flow: atomic gate, notes, uncommit reshaping, collapse", async
         // TST-1 was already seen at the last review and is byte-identical -> collapsed
         assertStringIncludes(html, "unchanged since your last review");
         assertStringIncludes(html, `class="ticket collapsed"`);
+        // collapsed cards get a one-line header (long titles truncate instead of
+        // wrapping the badge onto a second row)
+        assertStringIncludes(html, `<header class="oneline">`);
       });
 
       assertEquals(outcome.status, "pushed");

@@ -143,6 +143,31 @@ Deno.test("creates order parents first and chain @refs", async () => {
   assertEquals((creates[1].body as any).fields.parent, { key: "@epic" });
 });
 
+Deno.test("existing ticket re-parented onto a committed creation compiles in one push", async () => {
+  const store = tempStore();
+  const base = makeTicket({ key: "TST-30" });
+  store.writeBase(makeBaseEntry(base));
+  store.writeCommitted("TST-30", serializeTicket({ ...base, parent: "@epic" }));
+  const epic = makeTicket({ type: "Epic", summary: "the epic" });
+  delete epic.status;
+  store.writeCommitted("@epic", serializeTicket(epic));
+
+  const { ops } = await compilePush(ctx(store));
+  // The create precedes the update, so the @ref resolves at execution time.
+  assertEquals(ops.map((o) => o.kind), ["create", "update"]);
+  assertEquals(ops[1].issue, "TST-30");
+  // deno-lint-ignore no-explicit-any
+  assertEquals((ops[1].body as any).fields.parent, { key: "@epic" });
+});
+
+Deno.test("existing ticket parent -> uncommitted @ref is a hard error", async () => {
+  const store = tempStore();
+  const base = makeTicket({ key: "TST-31" });
+  store.writeBase(makeBaseEntry(base));
+  store.writeCommitted("TST-31", serializeTicket({ ...base, parent: "@nope" }));
+  await assertRejects(() => compilePush(ctx(store)), UserError, "not a committed new ticket");
+});
+
 Deno.test("link ops: direction mapping and cross-file dedupe", async () => {
   const store = tempStore();
   const a = makeTicket({ key: "TST-10", links: [] });

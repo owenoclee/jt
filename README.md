@@ -58,12 +58,17 @@ $EDITOR tickets/ENG-123.json
 jt diff
 jt commit -m "update ENG-123"
 jt push
+jt await
 ```
 
-`jt push` prints a local review URL and waits for one decision:
+`jt push` prints a local review URL and returns immediately; `jt await` blocks until
+the review settles and reports the outcome. The page offers one decision:
 
 - **Approve & push** sends the whole changeset exactly as shown.
 - **Request changes** sends nothing and returns per-ticket notes.
+
+The page never expires — a review takes as long as it takes. `jt cancel` withdraws an
+undecided review without sending anything.
 
 Each card lists the ticket's fields in one stable order — changed fields show their
 diff with a bold name, unchanged ones (epic, labels, sprint, …) appear as muted
@@ -120,6 +125,7 @@ jt new first-story --type Story --summary "First slice" --parent @big-epic
 jt diff
 jt commit
 jt push
+jt await
 ```
 
 Pending tickets use `@name` references — existing tickets may use them too (for

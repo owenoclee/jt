@@ -44,10 +44,7 @@ import type {
 export type PushContext = ReturnType<typeof localContext> & { meta: Meta; client: JiraClient };
 
 export async function cmdPush(argv: string[]): Promise<void> {
-  const args = parseArgs(argv, {
-    boolean: ["dry-run", "full"],
-    string: ["timeout"],
-  });
+  const args = parseArgs(argv, { boolean: ["dry-run", "full"] });
   const ctx = withClient(withMeta(localContext()));
   const jiraDir = ctx.ws.jiraDir;
 
@@ -57,7 +54,7 @@ export async function cmdPush(argv: string[]): Promise<void> {
   if (pending && pidAlive(pending.pid)) {
     fail(
       `a review is already pending: ${pending.url}\n` +
-        `  decide it there (jt await reports the outcome) before pushing again`,
+        `  decide it there (jt await reports the outcome), or jt cancel to withdraw it`,
     );
   }
   if (pending) clearPending(jiraDir); // stale: the server died without recording anything
@@ -74,12 +71,10 @@ export async function cmdPush(argv: string[]): Promise<void> {
     return;
   }
   for (const w of compiled.warnings) console.log(`${yellow("warning:")} ${w}`);
-  const timeoutMs = args.timeout ? Number(args.timeout) * 1000 : 600_000;
   writeSpec(jiraDir, {
     ops: compiled.ops,
     warnings: compiled.warnings,
     existingKeys: compiled.existingKeys,
-    timeoutMs,
   });
   const url = await spawnReviewServer(ctx.ws.root, jiraDir);
   console.log(`${bold("review page:")} ${url}`);

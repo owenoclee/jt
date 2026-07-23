@@ -165,7 +165,6 @@ function diffWeb(
     commits: buildCommitViews(store, refs),
     sinceReview: buildSinceReview(store, tickets.map((t) => t.id), refs),
     nonce: "",
-    timeoutMs: 0,
   };
   const dir = join(store.jiraDir, "tmp");
   Deno.mkdirSync(dir, { recursive: true });
@@ -253,7 +252,6 @@ function showWeb(
     commits: buildCommitViews(store, refs),
     sinceReview: null,
     nonce: "",
-    timeoutMs: 0,
   };
   const dir = join(store.jiraDir, "tmp");
   Deno.mkdirSync(dir, { recursive: true });

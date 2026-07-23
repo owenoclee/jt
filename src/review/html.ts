@@ -72,7 +72,8 @@ export interface ReviewPageModel {
   }[];
   sinceReview: { fromSeq: number; sections: TicketSection[] } | null;
   nonce: string;
-  timeoutMs: number;
+  /** Info pages only — drives the expiry countdown. Review pages never expire. */
+  timeoutMs?: number;
 }
 
 /** Full diff of a ticket between two states (null = doesn't exist on that side). */
@@ -375,7 +376,6 @@ export function renderPage(model: ReviewPageModel): string {
 
   const footer = isReview
     ? `<footer class="sendbar">
-        <span id="countdown"></span>
         <button id="request" type="button">Request changes</button>
         <button id="approve" type="button">Approve &amp; push all ${model.tickets.length}</button>
       </footer>`
@@ -396,7 +396,6 @@ export function renderPage(model: ReviewPageModel): string {
   const reviewJs = isReview
     ? `
     const nonce = ${JSON.stringify(model.nonce)};
-    const deadline = Date.now() + ${model.timeoutMs};
     const tickets = [...document.querySelectorAll('section.ticket[data-id]')];
     function notes() {
       const out = {};
@@ -406,12 +405,6 @@ export function renderPage(model: ReviewPageModel): string {
       }
       return out;
     }
-    setInterval(() => {
-      const left = Math.max(0, deadline - Date.now());
-      const m = Math.floor(left / 60000), s = Math.floor((left % 60000) / 1000);
-      document.getElementById('countdown').textContent =
-        left > 0 ? 'times out in ' + m + 'm ' + String(s).padStart(2, '0') + 's' : 'timed out';
-    }, 500);
     // Feedback and approval are mutually exclusive: any non-empty note blocks approve.
     const approveBtn = document.getElementById('approve');
     const approveLabel = approveBtn.textContent;
@@ -443,7 +436,7 @@ export function renderPage(model: ReviewPageModel): string {
   const infoJs = isInfo
     ? `
     const nonce = ${JSON.stringify(model.nonce)};
-    const deadline = Date.now() + ${model.timeoutMs};
+    const deadline = Date.now() + ${model.timeoutMs ?? 600_000};
     setInterval(() => {
       const left = Math.max(0, deadline - Date.now());
       const m = Math.floor(left / 60000), s = Math.floor((left % 60000) / 1000);

@@ -11,7 +11,9 @@ import { cmdInit } from "../src/commands/init.ts";
 import { cmdRm } from "../src/commands/local.ts";
 import { cmdMeta } from "../src/commands/meta.ts";
 import { cmdPush } from "../src/commands/push.ts";
+import { cmdAwait } from "../src/commands/push_detach.ts";
 import { UserError } from "../src/errors.ts";
+import { readPending } from "../src/review/handoff.ts";
 import { Store } from "../src/store.ts";
 import type { Ticket } from "../src/types.ts";
 import { MockJira } from "./mock_jira.ts";
@@ -22,19 +24,19 @@ function readTicket(store: Store, id: string): Ticket {
   return wf.ticket;
 }
 
-/** Push is approval-only: drive the review page over HTTP and approve the changeset. */
+/** Push is approval-only: approve on the detached review page, then collect via await. */
 async function pushApproved(argv: string[] = []): Promise<void> {
-  let url = "";
-  const done = cmdPush(argv, { onServe: (u) => (url = u) });
-  while (!url) await new Promise((r) => setTimeout(r, 5));
-  const res = await fetch(url.replace("/review/", "/decide/"), {
+  await cmdPush(argv); // returns as soon as the detached server reports its URL
+  const pending = readPending(join(Deno.cwd(), ".jira"));
+  if (!pending) throw new Error("no pending review after push");
+  const res = await fetch(pending.url.replace("/review/", "/decide/"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ decision: "approve", notes: {} }),
   });
   assertEquals(res.status, 200);
   await res.body?.cancel();
-  await done;
+  await cmdAwait([]); // approved and pushed → exit code 0 path returns normally
 }
 
 Deno.test("e2e: full lifecycle against mock Jira", async (t) => {

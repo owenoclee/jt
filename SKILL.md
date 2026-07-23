@@ -68,25 +68,32 @@ jt fetch PROJ-123
 # edit tickets/PROJ-123.json
 jt diff PROJ-123
 jt commit PROJ-123 -m "explain the change"
-jt push
+jt push        # prints the review URL and returns immediately
+jt await       # blocks until the human decides, then reports the outcome
 ```
 
 `jt push` is the only command that mutates Jira. It:
 
 1. Compiles committed state, never the working files.
 2. Checks that Jira has not changed since the last fetch.
-3. Serves a local review page.
-4. Sends the entire changeset only when the user selects **Approve & push**.
+3. Starts a detached review server, prints `review page: <url>`, and returns
+   immediately. Nothing has been sent at this point.
+4. The entire changeset is sent only when the user selects **Approve & push** on that
+   page.
 
-**Request changes** sends nothing and returns notes on stdout. Exit status is `0` for
-approved and pushed, `2` for changes requested, and `1` for timeout, staleness, or
-failure. The default review timeout is 600 seconds; override it with `--timeout SECS`.
+As soon as `jt push` prints the URL, open it for the user with the OS opener if
+available and tell them it is ready. Never fetch it, inspect it, or interact with it
+using browser automation: approval belongs to the human.
+
+Then run `jt await` — as a background task where supported, so the session is not
+blocked — to collect the outcome. It reports each outcome exactly once. Exit status is
+`0` for approved and pushed (created keys are listed), `2` for changes requested
+(**Request changes** sends nothing; per-ticket notes arrive on stdout), and `1` for
+timeout, staleness, or push failure. The default review timeout is 600 seconds;
+override it with `jt push --timeout SECS`. A new `jt push` refuses to start while a
+review is pending or an outcome is uncollected.
 
 `jt push --dry-run` prints the compiled operations without serving or sending.
-
-When `jt push` prints `review page: <url>`, open that URL for the user with the OS
-opener if available. Never fetch it, inspect it, or interact with it using browser
-automation: approval belongs to the human.
 
 If the user requests edits, update the working file and commit another round. To omit
 a ticket while keeping its working edits, run `jt uncommit ID`; the next review page

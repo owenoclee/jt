@@ -1,9 +1,9 @@
 {
   "tasks": {
-    "jt": "deno run --allow-read --allow-write --allow-env --allow-net src/main.ts",
-    "test": "deno test --allow-read --allow-write --allow-env --allow-net",
+    "jt": "deno run --allow-read --allow-write --allow-env --allow-net --allow-run src/main.ts",
+    "test": "deno test --allow-read --allow-write --allow-env --allow-net --allow-run",
     "check": "deno check src/main.ts scripts/generate_homebrew_formula.ts && deno lint",
-    "install": "deno install --global --force --name jt --allow-read --allow-write --allow-env --allow-net --config deno.json src/main.ts"
+    "install": "deno install --global --force --name jt --allow-read --allow-write --allow-env --allow-net --allow-run --config deno.json src/main.ts"
   },
   "imports": {
     "@std/cli": "jsr:@std/cli@^1.0.0",

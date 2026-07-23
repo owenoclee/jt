@@ -37,7 +37,7 @@ jobs:
             aarch64-apple-darwin; do
             echo "compiling $target"
             deno compile \
-              --allow-read --allow-write --allow-env --allow-net \
+              --allow-read --allow-write --allow-env --allow-net --allow-run \
               --target "$target" \
               --output "dist/raw/jt-$target" \
               src/main.ts

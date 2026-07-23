@@ -6,7 +6,7 @@
  * The page itself never expires; `jt cancel` withdraws an undecided review.
  */
 import { parseArgs } from "@std/cli";
-import { fromFileUrl } from "@std/path";
+import { basename, fromFileUrl } from "@std/path";
 import { localContext, withClient, withMeta } from "../context.ts";
 import { fail } from "../errors.ts";
 import { dim } from "../render/colors.ts";
@@ -30,12 +30,16 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Spawn `jt _push-serve` detached and return the review URL it reports. */
 export async function spawnReviewServer(root: string, jiraDir: string): Promise<string> {
-  // Running from source (deno run, or the deno install wrapper): spawn `deno run
-  // main.ts`. Compiled binary (main.ts not on disk): the executable IS jt.
+  // Decide by what is executing NOW: under the deno CLI (deno run / deno task / an
+  // installed wrapper) spawn `deno run main.ts`; otherwise this process IS the
+  // compiled jt binary — Deno.execPath() is jt itself, so spawn it directly. Never
+  // infer from main.ts's presence on disk: a compiled binary on a machine that also
+  // has the source tree at its compile-time path (any dev machine) would wrongly
+  // exec `jt run ... main.ts`, which is an unknown jt command.
   const mainModule = new URL("../main.ts", import.meta.url);
   const configFile = new URL("../../deno.json", import.meta.url);
-  const fromSource = mainModule.protocol === "file:" && exists(fromFileUrl(mainModule));
-  const args = fromSource
+  const underDenoCli = basename(Deno.execPath()).replace(/\.exe$/, "") === "deno";
+  const args = underDenoCli
     ? [
       "run",
       "--allow-read",
@@ -248,13 +252,4 @@ export async function cmdCancel(): Promise<void> {
   if (result) clearResult(jiraDir); // the server's own cancellation record — collected here
   clearPending(jiraDir);
   console.log("review cancelled — nothing was sent");
-}
-
-function exists(path: string): boolean {
-  try {
-    Deno.statSync(path);
-    return true;
-  } catch {
-    return false;
-  }
 }

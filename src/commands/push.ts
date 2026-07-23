@@ -2,10 +2,11 @@
  * jt push: the single remote-mutating verb — and it is approval-only.
  *
  * Compiles committed−base into exact API ops (never reading the working tree), checks
- * remote staleness, then hands the changeset to the browser review page served from
- * this same process (see src/review/server.ts). A human decision there is the only
- * thing that executes; no headless mutation path exists. --dry-run prints the
- * compiled plan and stops. Executed ops are journaled with approval provenance.
+ * remote staleness, then hands the changeset to a detached review server (see
+ * src/commands/push_detach.ts) and prints its URL immediately. A human decision on
+ * that page is the only thing that executes; no headless mutation path exists, and
+ * `jt await` reports the decision's outcome. --dry-run prints the compiled plan and
+ * stops. Executed ops are journaled with approval provenance.
  */
 // deno-lint-ignore-file no-explicit-any
 import { parseArgs } from "@std/cli";
@@ -25,10 +26,10 @@ import { fail } from "../errors.ts";
 import { JiraApiError, type JiraClient } from "../jira/client.ts";
 import { searchPage } from "../jira/search.ts";
 import { bold, cyan, dim, green, red, yellow } from "../render/colors.ts";
-// Type-only: the runtime import of the review server stays dynamic (it imports us back).
-import type { ReviewOptions } from "../review/server.ts";
+import { clearPending, pidAlive, readPending, readResult, writeSpec } from "../review/handoff.ts";
 import type { Store } from "../store.ts";
 import { fetchBaseEntry, integrateFetched } from "../sync.ts";
+import { spawnReviewServer } from "./push_detach.ts";
 import type {
   BaseEntry,
   CommentEntry,
@@ -42,15 +43,27 @@ import type {
 
 export type PushContext = ReturnType<typeof localContext> & { meta: Meta; client: JiraClient };
 
-export async function cmdPush(
-  argv: string[],
-  reviewOpts: Partial<ReviewOptions> = {},
-): Promise<void> {
+export async function cmdPush(argv: string[]): Promise<void> {
   const args = parseArgs(argv, {
     boolean: ["dry-run", "full"],
     string: ["timeout"],
   });
   const ctx = withClient(withMeta(localContext()));
+  const jiraDir = ctx.ws.jiraDir;
+
+  // One review at a time, and outcomes are collected exactly once: refuse while a
+  // page is live, and refuse to bury an uncollected outcome (its notes may matter).
+  const pending = readPending(jiraDir);
+  if (pending && pidAlive(pending.pid)) {
+    fail(
+      `a review is already pending: ${pending.url}\n` +
+        `  decide it there (jt await reports the outcome) before pushing again`,
+    );
+  }
+  if (pending) clearPending(jiraDir); // stale: the server died without recording anything
+  if (readResult(jiraDir)) {
+    fail("the previous push finished but its outcome was never collected — run jt await first");
+  }
 
   const compiled = await compilePush(ctx);
   await checkStaleness(ctx, compiled.existingKeys);
@@ -60,15 +73,19 @@ export async function cmdPush(
     console.log(`\n${cyan("dry-run")} — nothing sent`);
     return;
   }
-  const { runReviewFlow } = await import("../review/server.ts");
+  for (const w of compiled.warnings) console.log(`${yellow("warning:")} ${w}`);
   const timeoutMs = args.timeout ? Number(args.timeout) * 1000 : 600_000;
-  const outcome = await runReviewFlow(ctx, compiled, { timeoutMs, ...reviewOpts });
-  // Exit codes for the agent loop: 0 = approved and pushed whole,
-  // 2 = changes requested (notes on stdout), 1 = timeout/stale/push failure.
-  if (outcome.status === "timeout" || outcome.status === "stale" || outcome.pushFailure) {
-    Deno.exit(1);
-  }
-  if (outcome.status === "changes-requested") Deno.exit(2);
+  writeSpec(jiraDir, {
+    ops: compiled.ops,
+    warnings: compiled.warnings,
+    existingKeys: compiled.existingKeys,
+    timeoutMs,
+  });
+  const url = await spawnReviewServer(ctx.ws.root, jiraDir);
+  console.log(`${bold("review page:")} ${url}`);
+  console.log(
+    dim("open it in a browser to decide — nothing is sent until Approve & push; jt await reports the outcome"),
+  );
 }
 
 /** Refuse (before any mutation) if remote moved past our base for any staged ticket. */

@@ -93,9 +93,16 @@ Then run `jt await` — as a background task where supported, so the session is 
 blocked — to collect the outcome. It reports each outcome exactly once. Exit status is
 `0` for approved and pushed (created keys are listed), `2` for changes requested
 (**Request changes** sends nothing; per-ticket notes arrive on stdout), and `1` for
-timeout, staleness, or push failure. The default review timeout is 600 seconds;
-override it with `jt push --timeout SECS`. A new `jt push` refuses to start while a
-review is pending or an outcome is uncollected.
+staleness, push failure, or a cancelled review.
+
+The review page never expires — the human takes as long as the changeset needs.
+`jt await` itself gives up after 600 seconds (`--timeout SECS` adjusts this); that
+expiry collects nothing and is harmless — simply run `jt await` again. Never cancel a
+review because a wait expired: the page is still live and the human may be mid-read.
+`jt cancel` is for deliberately withdrawing a review (nothing is sent) — for example
+when the user asks for edits outside the page — and is refused once the decision has
+landed. A new `jt push` refuses to start while a review is pending or an outcome is
+uncollected.
 
 `jt push --dry-run` prints the compiled operations without serving or sending.
 

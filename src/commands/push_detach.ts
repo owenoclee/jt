@@ -3,6 +3,7 @@
  * the review server in its own process so `jt push` can print the URL and return
  * immediately; `jt await` collects the outcome — exactly once — with the exit codes
  * the blocking push used to have (0 pushed · 2 changes requested · 1 otherwise).
+ * The page itself never expires; `jt cancel` withdraws an undecided review.
  */
 import { parseArgs } from "@std/cli";
 import { fromFileUrl } from "@std/path";
@@ -13,6 +14,7 @@ import {
   clearPending,
   clearResult,
   clearSpec,
+  type PendingPush,
   pidAlive,
   pushLogPath,
   type PushResultFile,
@@ -108,21 +110,34 @@ export async function cmdPushServe(): Promise<void> {
     logFile.close();
   };
 
+  // jt cancel SIGTERMs this process. Undecided: record a cancelled outcome and stop.
+  // Decided: ignore the signal — the outcome is already executing and must settle;
+  // cancel learns it lost the race from the decidedAt stamp on the pending file.
+  let decided = false;
+  const onSigterm = () => {
+    if (decided) return;
+    capture("review cancelled — nothing was sent");
+    finish({ status: "cancelled", notes: {}, pushFailure: null });
+    Deno.exit(0);
+  };
+  Deno.addSignalListener("SIGTERM", onSigterm);
+
   const { runReviewFlow } = await import("../review/server.ts");
+  let pending: PendingPush | null = null;
   try {
     const outcome = await runReviewFlow(
       ctx,
       { ops: spec.ops, warnings: spec.warnings, existingKeys: spec.existingKeys },
       {
-        timeoutMs: spec.timeoutMs,
         announce: false,
-        onServe: (url) =>
-          writePending(jiraDir, {
-            pid: Deno.pid,
-            url,
-            startedAt: new Date().toISOString(),
-            timeoutMs: spec.timeoutMs,
-          }),
+        onServe: (url) => {
+          pending = { pid: Deno.pid, url, startedAt: new Date().toISOString() };
+          writePending(jiraDir, pending);
+        },
+        onDecision: () => {
+          decided = true;
+          if (pending) writePending(jiraDir, { ...pending, decidedAt: new Date().toISOString() });
+        },
       },
     );
     finish({ status: outcome.status, notes: outcome.notes, pushFailure: outcome.pushFailure });
@@ -131,6 +146,8 @@ export async function cmdPushServe(): Promise<void> {
     capture(`review server crashed: ${msg}`);
     finish({ status: "error", notes: {}, pushFailure: msg });
     Deno.exit(1);
+  } finally {
+    Deno.removeSignalListener("SIGTERM", onSigterm);
   }
 }
 
@@ -154,9 +171,10 @@ export async function cmdAwait(argv: string[]): Promise<void> {
       fail("nothing to await — no pending review and no uncollected outcome (jt push first)");
     }
     console.log(dim(`waiting on the review at ${pending.url} ...`));
-    const deadline = args.timeout
-      ? Date.now() + Number(args.timeout) * 1000
-      : Date.parse(pending.startedAt) + pending.timeoutMs + 15_000;
+    // Bounds this wait, never the review: giving up collects nothing and the page
+    // stays live — rerun jt await to keep waiting.
+    const timeoutMs = args.timeout ? Number(args.timeout) * 1000 : 600_000;
+    const deadline = Date.now() + timeoutMs;
     while (!result && Date.now() < deadline) {
       await sleep(250);
       result = readResult(jiraDir);
@@ -173,13 +191,63 @@ export async function cmdAwait(argv: string[]): Promise<void> {
       }
     }
     if (!result) {
-      fail("gave up waiting — the review page may still be open; run jt await again");
+      fail(
+        "gave up waiting — the review page is still live; run jt await again " +
+          "(or jt cancel to withdraw the review)",
+      );
     }
   }
   clearResult(jiraDir);
   for (const line of result.log) console.log(line);
   const code = exitCodeFor(result);
   if (code !== 0) Deno.exit(code);
+}
+
+/**
+ * jt cancel — withdraw the pending review deliberately: stop its server; nothing is
+ * sent. Refused once the decision has landed (the outcome, and possibly the push
+ * itself, is already executing — collect it with jt await instead).
+ */
+export async function cmdCancel(): Promise<void> {
+  const { ws } = localContext();
+  const jiraDir = ws.jiraDir;
+  const pending = readPending(jiraDir);
+  if (!pending) {
+    if (readResult(jiraDir)) {
+      fail("nothing to cancel — the review already settled; run jt await to collect its outcome");
+    }
+    fail("nothing to cancel — no review is pending");
+  }
+  if (pending.decidedAt) {
+    fail("too late to cancel — the review was already decided; jt await reports the outcome");
+  }
+  if (pidAlive(pending.pid)) {
+    try {
+      Deno.kill(pending.pid, "SIGTERM");
+    } catch {
+      // exited between the liveness probe and the signal
+    }
+    const deadline = Date.now() + 10_000;
+    while (pidAlive(pending.pid) && Date.now() < deadline) {
+      await sleep(100);
+      if (readPending(jiraDir)?.decidedAt) {
+        fail("too late to cancel — the review was decided first; jt await reports the outcome");
+      }
+    }
+    if (pidAlive(pending.pid)) {
+      fail(
+        `the review server (pid ${pending.pid}) is still running — ` +
+          `it may be executing a decision; run jt await`,
+      );
+    }
+  }
+  const result = readResult(jiraDir);
+  if (result && result.status !== "cancelled") {
+    fail("too late to cancel — the review already settled; run jt await to collect its outcome");
+  }
+  if (result) clearResult(jiraDir); // the server's own cancellation record — collected here
+  clearPending(jiraDir);
+  console.log("review cancelled — nothing was sent");
 }
 
 function exists(path: string): boolean {

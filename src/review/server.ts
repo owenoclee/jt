@@ -17,12 +17,14 @@ import { buildPageModel } from "./model.ts";
 import { buildTicketPlans } from "./plan.ts";
 
 export interface ReviewOptions {
-  timeoutMs: number;
   port?: number;
   /** Print the review URL to stdout (default true; the detached server passes false). */
   announce?: boolean;
   /** Called with the review URL once the server is listening. */
   onServe?: (url: string) => void;
+  /** Called the instant the decision POST lands, before anything executes. The
+      detached server uses this to mark the review no-longer-cancellable. */
+  onDecision?: () => void;
 }
 
 export interface Decision {
@@ -33,7 +35,7 @@ export interface Decision {
 }
 
 export interface ReviewOutcome {
-  status: "pushed" | "changes-requested" | "timeout" | "stale";
+  status: "pushed" | "changes-requested" | "stale";
   notes: Record<string, string>;
   pushFailure: string | null;
 }
@@ -46,15 +48,10 @@ export async function runReviewFlow(
   const { store } = ctx;
   const plans = buildTicketPlans(store, compiled.ops);
   const refs = makeRefContext(store, ctx.ws.config);
-  const model = buildPageModel(store, ctx.ws.config, plans, opts.timeoutMs, refs);
+  const model = buildPageModel(store, ctx.ws.config, plans, refs);
 
   for (const w of compiled.warnings) console.log(`${yellow("warning:")} ${w}`);
   const decision = await serveAndAwait(model, opts);
-
-  if (decision === null) {
-    console.log(red("review timed out — nothing was sent"));
-    return { status: "timeout", notes: {}, pushFailure: null };
-  }
 
   const tipSeq = readChain(store).entries.at(-1)?.seq;
   if (tipSeq !== undefined) writeReviewMarker(store, tipSeq);
@@ -103,11 +100,15 @@ export async function runReviewFlow(
   return { status: "pushed", notes: decision.notes, pushFailure: result.failure };
 }
 
-/** Serve the page on loopback and wait for one decision POST (or timeout). */
+/**
+ * Serve the page on loopback and wait for one decision POST. The page has no
+ * deadline — a review takes as long as the human needs; an unwanted one is
+ * withdrawn deliberately with jt cancel, never by a clock.
+ */
 async function serveAndAwait(
   model: ReviewPageModel,
   opts: ReviewOptions,
-): Promise<Decision | null> {
+): Promise<Decision> {
   let resolveDecision!: (d: Decision) => void;
   const decided = new Promise<Decision>((r) => (resolveDecision = r));
   let done = false;
@@ -129,6 +130,7 @@ async function serveAndAwait(
           }
           const notes = body.notes && typeof body.notes === "object" ? body.notes : {};
           done = true;
+          opts.onDecision?.();
           resolveDecision({
             decision: body.decision,
             notes,
@@ -155,12 +157,7 @@ async function serveAndAwait(
   }
   opts.onServe?.(reviewUrl);
 
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<null>((r) => {
-    timer = setTimeout(() => r(null), opts.timeoutMs);
-  });
-  const result = await Promise.race([decided, timeout]);
-  clearTimeout(timer);
+  const result = await decided;
   await server.shutdown();
   return result;
 }

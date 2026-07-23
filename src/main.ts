@@ -4,7 +4,7 @@ import { cmdChanges } from "./commands/changes.ts";
 import { cmdFetch, cmdPull } from "./commands/fetch.ts";
 import { cmdCommit } from "./commands/commit.ts";
 import { cmdPush } from "./commands/push.ts";
-import { cmdAwait, cmdPushServe } from "./commands/push_detach.ts";
+import { cmdAwait, cmdCancel, cmdPushServe } from "./commands/push_detach.ts";
 import {
   cmdDiff,
   cmdLog,
@@ -62,17 +62,19 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
     jt resolve KEY          accept working file as desired state after a pull conflict
 
   push (the only remote-mutating verb — approval-only)
-    jt push [--timeout SECS]
-                            compile committed−base → serve the changeset as a browser
+    jt push                 compile committed−base → serve the changeset as a browser
                             review page from a detached process; prints the URL and
                             returns immediately. ONE human decision there: Approve &
                             push (the WHOLE changeset, exactly as rendered) or Request
-                            changes (nothing sent; per-ticket notes returned). There is
-                            no headless push.
+                            changes (nothing sent; per-ticket notes returned). The page
+                            never expires; there is no headless push.
     jt await [--timeout SECS]
                             block until the pending review settles, then report it —
                             exactly once. exit 0 pushed · 2 changes requested (notes on
-                            stdout) · 1 timeout/stale/failure
+                            stdout) · 1 stale/failed/cancelled. gives up harmlessly
+                            after SECS (default 600) — rerun to keep waiting
+    jt cancel               withdraw the pending review: stops the page, sends nothing;
+                            refused once the decision has landed
     jt push --dry-run       print the compiled API ops and stop (nothing served or sent;
                             ADF bodies elided — add --full for the raw JSON)
 
@@ -119,6 +121,8 @@ async function main(): Promise<void> {
       return await cmdPush(rest);
     case "await":
       return await cmdAwait(rest);
+    case "cancel":
+      return await cmdCancel();
     case "_push-serve":
       return await cmdPushServe();
     case "log":

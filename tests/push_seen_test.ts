@@ -36,7 +36,7 @@ async function approvePush(beforeDecide?: () => void): Promise<ReviewOutcome> {
   const compiled = await compilePush(ctx);
   await checkStaleness(ctx, compiled.existingKeys);
   let url = "";
-  const flow = runReviewFlow(ctx, compiled, { timeoutMs: 10_000, onServe: (u) => (url = u) });
+  const flow = runReviewFlow(ctx, compiled, { onServe: (u) => (url = u) });
   while (!url) await new Promise((r) => setTimeout(r, 5));
   beforeDecide?.();
   const res = await fetch(url.replace("/review/", "/decide/"), {

@@ -162,7 +162,6 @@ Deno.test("web pages: unchanged-field context rows and the ⚙ panel", async (t)
       commits: [],
       sinceReview: null,
       nonce: "",
-      timeoutMs: 0,
     };
     const html = renderPage(model);
     assertStringIncludes(html, 'id="fieldgear"');

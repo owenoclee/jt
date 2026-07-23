@@ -16,6 +16,10 @@
  * pending-push.json, so there is no window where the server is gone but its outcome
  * is unrecorded. A pending file whose pid is dead therefore means the child was
  * killed outright — the result file, if any, still reports the last recorded state.
+ *
+ * jt cancel SIGTERMs the child: while undecided it records a "cancelled" result and
+ * exits; once a decision has landed (decidedAt on the pending file) it ignores the
+ * signal — the decided outcome must settle and be collected.
  */
 import { join } from "@std/path";
 import type { CompiledOp } from "../types.ts";
@@ -25,20 +29,22 @@ export interface PushSpec {
   ops: CompiledOp[];
   warnings: string[];
   existingKeys: string[];
-  timeoutMs: number;
 }
 
 export interface PendingPush {
   pid: number;
   url: string;
   startedAt: string;
-  timeoutMs: number;
+  /** Stamped the instant the decision POST lands. From then on jt cancel refuses:
+      the decision — possibly the push itself — is already executing. */
+  decidedAt?: string;
 }
 
 export interface PushResultFile {
   finishedAt: string;
-  /** "error" = the server crashed before reaching a decision. */
-  status: ReviewOutcome["status"] | "error";
+  /** "error" = the server crashed before reaching a decision;
+      "cancelled" = jt cancel stopped the review while it was still undecided. */
+  status: ReviewOutcome["status"] | "error" | "cancelled";
   notes: Record<string, string>;
   pushFailure: string | null;
   /** Everything the child printed while deciding/executing; replayed by jt await. */

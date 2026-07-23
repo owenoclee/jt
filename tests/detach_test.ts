@@ -11,7 +11,7 @@ import { cmdFetch } from "../src/commands/fetch.ts";
 import { cmdInit } from "../src/commands/init.ts";
 import { cmdMeta } from "../src/commands/meta.ts";
 import { cmdPush } from "../src/commands/push.ts";
-import { cmdAwait, exitCodeFor } from "../src/commands/push_detach.ts";
+import { cmdAwait, cmdCancel, exitCodeFor } from "../src/commands/push_detach.ts";
 import {
   clearResult,
   readPending,
@@ -129,6 +129,45 @@ Deno.test({
           msg = e instanceof Error ? e.message : String(e);
         }
         assertStringIncludes(msg, "nothing to await");
+      });
+
+      await t.step("cancel withdraws the pending review; nothing sent, next push clean", async () => {
+        const t1 = store.readWorking("TST-1")!.ticket;
+        store.writeWorking("TST-1", { ...t1, labels: ["late-label"] });
+        cmdCommit([]);
+        await cmdPush([]);
+        assert(readPending(jiraDir), "a review must be pending before the cancel");
+
+        await cmdCancel();
+        assert(logs.some((l) => l.includes("review cancelled — nothing was sent")));
+        assertEquals(mock.issues.get("TST-1")!.labels.includes("late-label"), false);
+        assertEquals(readPending(jiraDir), null, "cancel must release the pending review");
+        assertEquals(readResult(jiraDir), null, "cancel collects the cancellation record itself");
+
+        // The round is fully withdrawn: nothing to await, and the next push starts clean.
+        let msg = "";
+        try {
+          await cmdAwait([]);
+        } catch (e) {
+          msg = e instanceof Error ? e.message : String(e);
+        }
+        assertStringIncludes(msg, "nothing to await");
+        await cmdPush([]);
+        const urlLine = logs.findLast((l) => l.includes("review page:"))!;
+        url = urlLine.match(/http:\/\/127\.0\.0\.1:\d+\/review\/[a-z0-9-]+/)![0];
+        await decide(url, "approve");
+        await cmdAwait([]);
+        assertEquals(mock.issues.get("TST-1")!.labels.includes("late-label"), true);
+      });
+
+      await t.step("cancel with nothing pending fails", async () => {
+        let msg = "";
+        try {
+          await cmdCancel();
+        } catch (e) {
+          msg = e instanceof Error ? e.message : String(e);
+        }
+        assertStringIncludes(msg, "nothing to cancel");
       });
     } finally {
       console.log = origLog;

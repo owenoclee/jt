@@ -22,7 +22,6 @@ export function buildPageModel(
   store: Store,
   config: Config,
   plans: TicketPlan[],
-  timeoutMs: number,
   refs: RefContext = NO_REFS,
 ): ReviewPageModel {
   const chain = readChain(store);
@@ -62,7 +61,6 @@ export function buildPageModel(
     commits: buildCommitViews(store, refs),
     sinceReview: buildSinceReview(store, plans.map((p) => p.id), refs),
     nonce: crypto.randomUUID(),
-    timeoutMs,
   };
 }
 

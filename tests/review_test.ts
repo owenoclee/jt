@@ -2,7 +2,7 @@
  * Review-flow integration: drives jt push's review server over real HTTP
  * against the mock Jira — atomic approve/request-changes, per-ticket notes,
  * uncommit reshaping the changeset between rounds, unchanged-since-review
- * collapse, timeout.
+ * collapse.
  */
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { readChain, readReviewMarker } from "../src/chain.ts";
@@ -27,10 +27,7 @@ async function decideViaHttp(
   const compiled = await compilePush(ctx);
   await checkStaleness(ctx, compiled.existingKeys);
   let pageUrl = "";
-  const flow = runReviewFlow(ctx, compiled, {
-    timeoutMs: 10_000,
-    onServe: (url) => (pageUrl = url),
-  });
+  const flow = runReviewFlow(ctx, compiled, { onServe: (url) => (pageUrl = url) });
   while (!pageUrl) await new Promise((r) => setTimeout(r, 5));
   const pageRes = await fetch(pageUrl);
   const html = await pageRes.text();
@@ -153,16 +150,6 @@ Deno.test("review flow: atomic gate, notes, uncommit reshaping, collapse", async
       assertEquals(store.listCommittedIds(), []);
       assertEquals(readChain(store).entries.length, 0);
       assertEquals(readReviewMarker(store), null);
-    });
-
-    await t.step("timeout sends nothing", async () => {
-      const w = store.readWorking("TST-1")!.ticket;
-      store.writeWorking("TST-1", { ...w, labels: ["late-label"] });
-      cmdCommit([]);
-      const compiled = await compilePush(ctx);
-      const outcome = await runReviewFlow(ctx, compiled, { timeoutMs: 100 });
-      assertEquals(outcome.status, "timeout");
-      assertEquals(mock.issues.get("TST-1")!.labels.includes("late-label"), false);
     });
   } finally {
     console.log = origLog;

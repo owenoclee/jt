@@ -49,7 +49,6 @@ Deno.test("web page: header ids link to Jira; pending creations don't", () => {
     commits: [],
     sinceReview: null,
     nonce: "",
-    timeoutMs: 0,
   };
   const page = renderPage(model);
   assertStringIncludes(page, '<a class="ref" href="https://example.atlassian.net/browse/TST-1"');

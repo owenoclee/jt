@@ -150,8 +150,10 @@ Run `jt schema` for the strict ticket-file JSON Schema. Unknown keys are errors.
 
 ## Agents
 
-[SKILL.md](SKILL.md) is the agent contract. Install it in the agent's skills directory
-and allow local/read-only `jt` commands as appropriate. `jt push` is the only command
+[SKILL.md](SKILL.md) is the agent contract. Install it with `jt skill install
+claude-code` or `jt skill install codex`, or print it with `jt skill show` and
+redirect it wherever your agent discovers skills. Allow local/read-only `jt` commands
+as appropriate. `jt push` is the only command
 that can mutate Jira and it always requires user confirmation through the browser UI.
 
 The user should create the credential directly; an agent should never ask for, read,

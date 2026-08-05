@@ -1,6 +1,6 @@
 ---
 name: jt
-description: Manage Jira tickets with the jt CLI using local ticket files, computed diffs, and a human-approved push. Use for reading, creating, editing, linking, labeling, transitioning, commenting on, or deleting Jira tickets, assigning sprint work, or reviewing board changes.
+description: Manage Jira tickets with the jt CLI using local ticket files, computed diffs, and a human-approved push. Use for reading, searching, summarizing, creating, editing, linking, labeling, transitioning, commenting on, or deleting Jira tickets, assigning sprint work, or reviewing board changes.
 ---
 
 # jt agent contract
@@ -85,9 +85,13 @@ jt await       # blocks until the human decides, then reports the outcome
 4. The entire changeset is sent only when the user selects **Approve & push** on that
    page.
 
-As soon as `jt push` prints the URL, open it for the user with the OS opener if
-available and tell them it is ready. Never fetch it, inspect it, or interact with it
-using browser automation: approval belongs to the human.
+As soon as `jt push` prints the URL, open the review page in the user's browser
+yourself — `open <url>` on macOS, `xdg-open <url>` on Linux — and tell them it is
+ready. Opening the page is part of running a push, not an optional courtesy: do not
+just paste the URL and wait for the user to act. Only if no OS opener is available,
+give them the URL and say it must be opened by hand. Never fetch the page, inspect
+it, or drive it with browser automation: the opener hands it to the human, and
+approval belongs to them.
 
 Then run `jt await` — as a background task where supported, so the session is not
 blocked — to collect the outcome. It reports each outcome exactly once. Exit status is
@@ -142,7 +146,9 @@ exactly one of them — pick by which layer you need to move:
   user to configure Jira credentials using the authentication mechanism supported by
   their `jt` installation. Do not ask them to paste credentials into chat. Continue only
   after `jt config show` reports a credential source.
-- Never interact with a review-page URL yourself.
+- The moment `jt push` prints the review URL, open it for the user with the OS
+  opener. Beyond that, never interact with a review page yourself — no fetching, no
+  browser automation; the decision on it is the human's.
 - `jt push` is itself the approval gate: nothing reaches Jira without the human's
   explicit decision on the review page. Never ask permission to run it — that gates
   the gate. Commit, push, and hand the user the URL.
@@ -208,6 +214,12 @@ files.
   `jt meta sync`.
 
 ## Reading
+
+The synced mirror is a local database: `tickets/*.json` hold every ticket `sync.jql`
+matches, as ordinary JSON files. For any task that finds, filters, counts, or
+summarizes existing tickets, run `jt pull` to freshen the mirror, then read and grep
+the ticket files directly — do not fetch tickets one by one or query Jira for data
+the workspace already holds.
 
 ```sh
 jt show KEY                     # working copy

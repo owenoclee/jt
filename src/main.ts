@@ -1,5 +1,6 @@
 import { cmdConfigShow, cmdInit } from "./commands/init.ts";
 import { cmdMeta } from "./commands/meta.ts";
+import { cmdSkill } from "./commands/skill.ts";
 import { cmdChanges } from "./commands/changes.ts";
 import { cmdFetch, cmdPull } from "./commands/fetch.ts";
 import { cmdCommit } from "./commands/commit.ts";
@@ -78,7 +79,12 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
     jt push --dry-run       print the compiled API ops and stop (nothing served or sent;
                             ADF bodies elided — add --full for the raw JSON)
 
-  agent docs: jt schema   (ticket file JSON Schema) · see SKILL.md
+  agents
+    jt skill install <claude-code|codex>
+                            install the agent skill into the agent's skills directory
+    jt skill show           print the agent skill (SKILL.md) to stdout — install
+                            anywhere via a redirect
+    jt schema               print the ticket file JSON Schema
 `;
 
 async function main(): Promise<void> {
@@ -127,6 +133,8 @@ async function main(): Promise<void> {
       return await cmdPushServe();
     case "log":
       return cmdLog(rest);
+    case "skill":
+      return cmdSkill(rest);
     case "schema":
       return cmdSchema();
     case "version":

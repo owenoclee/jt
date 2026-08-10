@@ -72,7 +72,8 @@ jt fetch PROJ-123
 # edit tickets/PROJ-123.json
 jt diff PROJ-123
 jt commit PROJ-123 -m "explain the change"
-jt push        # prints the review URL and returns immediately
+jt push        # prints the review URL and returns immediately — nothing sent yet
+open <url>     # hand the page to the user (xdg-open on Linux)
 jt await       # blocks until the human decides, then reports the outcome
 ```
 
@@ -85,19 +86,27 @@ jt await       # blocks until the human decides, then reports the outcome
 4. The entire changeset is sent only when the user selects **Approve & push** on that
    page.
 
-As soon as `jt push` prints the URL, open the review page in the user's browser
-yourself — `open <url>` on macOS, `xdg-open <url>` on Linux — and tell them it is
-ready. Opening the page is part of running a push, not an optional courtesy: do not
-just paste the URL and wait for the user to act. Only if no OS opener is available,
-give them the URL and say it must be opened by hand. Never fetch the page, inspect
-it, or drive it with browser automation: the opener hands it to the human, and
-approval belongs to them.
+### Pushing is three steps, never one
 
-Then run `jt await` — as a background task where supported, so the session is not
-blocked — to collect the outcome. It reports each outcome exactly once. Exit status is
-`0` for approved and pushed (created keys are listed), `2` for changes requested
-(**Request changes** sends nothing; per-ticket notes arrive on stdout), and `1` for
-staleness, push failure, or a cancelled review.
+`jt push` returning is not a finished push — it is a page nobody has looked at yet.
+Every push owes two more steps, immediately and in this order:
+
+1. **Open the page for the user** the moment the URL prints — `open <url>` on macOS,
+   `xdg-open <url>` on Linux. Opening it is part of running a push, not an optional
+   courtesy: do not paste the URL and wait for the user to act. Then tell them it is
+   ready. Only if no OS opener is available, give them the URL and say it must be
+   opened by hand. Never fetch the page, inspect it, or drive it with browser
+   automation: the opener hands it to the human, and approval belongs to them.
+2. **Run `jt await`** — as a background task where supported, so the session is not
+   blocked. It reports each outcome exactly once. Exit status is `0` for approved and
+   pushed (created keys are listed), `2` for changes requested (**Request changes**
+   sends nothing; per-ticket notes arrive on stdout), and `1` for staleness, push
+   failure, or a cancelled review.
+
+Until `jt await` returns, the push is outstanding: do not report it as done, do not
+claim anything reached Jira, and do not move on to unrelated work. If you are about to
+end your turn with a review still pending, run `jt await` first. `jt push` prints both
+remaining steps under the URL — treat that as a live instruction, not a summary.
 
 The review page never expires — the human takes as long as the changeset needs.
 `jt await` itself gives up after 600 seconds (`--timeout SECS` adjusts this); that
@@ -149,6 +158,9 @@ exactly one of them — pick by which layer you need to move:
 - The moment `jt push` prints the review URL, open it for the user with the OS
   opener. Beyond that, never interact with a review page yourself — no fetching, no
   browser automation; the decision on it is the human's.
+- Never leave a review uncollected. `jt push` → open the URL → `jt await` is one
+  indivisible sequence; a turn must not end with a review pending or an outcome
+  uncollected.
 - `jt push` is itself the approval gate: nothing reaches Jira without the human's
   explicit decision on the review page. Never ask permission to run it — that gates
   the gate. Commit, push, and hand the user the URL.

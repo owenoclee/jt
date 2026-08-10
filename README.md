@@ -40,7 +40,7 @@ export JIRA_API_TOKEN=...
 Or create the durable credentials file without putting the token in shell history:
 
 ```sh
-sh -c 'umask 077; mkdir -p ~/.config/jira-cli; printf "token: "; IFS= read -rs t; printf "%s" "$t" > ~/.config/jira-cli/credentials; echo'
+sh -c 'umask 077; mkdir -p ~/.config/jt; printf "token: "; IFS= read -rs t; printf "%s" "$t" > ~/.config/jt/credentials; echo'
 ```
 
 The environment variable takes precedence. `jt config show` reports the active source
@@ -62,7 +62,9 @@ jt await
 ```
 
 `jt push` prints a local review URL and returns immediately; `jt await` blocks until
-the review settles and reports the outcome. The page offers one decision:
+the review settles and reports the outcome. The two always go together — a push is
+unfinished until `jt await` returns, so `jt push` prints the remaining steps under the
+URL. The page offers one decision:
 
 - **Approve & push** sends the whole changeset exactly as shown.
 - **Request changes** sends nothing and returns per-ticket notes.

@@ -81,6 +81,9 @@ Deno.test({
         const urlLine = logs.find((l) => l.includes("review page:"));
         assert(urlLine, "push must print the review URL");
         url = urlLine.match(/http:\/\/127\.0\.0\.1:\d+\/review\/[a-z0-9-]+/)![0];
+        const out = logs.join("\n");
+        assertStringIncludes(out, "NOT DONE"); // the handoff is spelled out, not implied
+        assertStringIncludes(out, "jt await");
         assert(readPending(jiraDir), "pending-push.json must exist while the page is live");
         assertEquals(readSpec(jiraDir), null, "the child must consume the spec file");
         const page = await fetch(url);

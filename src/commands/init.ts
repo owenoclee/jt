@@ -1,6 +1,6 @@
 import { parseArgs } from "@std/cli";
 import { join } from "@std/path";
-import { CREDENTIALS_PATH, loadToken, loadWorkspace } from "../config.ts";
+import { credentialsPath, legacyCredentialsPath, loadToken, loadWorkspace } from "../config.ts";
 import { fail } from "../errors.ts";
 import { Store } from "../store.ts";
 
@@ -63,7 +63,13 @@ export function cmdConfigShow(): void {
   try {
     const { source } = loadToken();
     console.log(`token: present (${source})`);
+    if (source === legacyCredentialsPath()) {
+      console.log(
+        `note:  that is the pre-rename location — it still works, but move it to ` +
+          `${credentialsPath()} when convenient`,
+      );
+    }
   } catch {
-    console.log(`token: MISSING — export JIRA_API_TOKEN or write ${CREDENTIALS_PATH}`);
+    console.log(`token: MISSING — export JIRA_API_TOKEN or write ${credentialsPath()}`);
   }
 }

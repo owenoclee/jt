@@ -43,24 +43,31 @@ export function loadWorkspace(cwd = Deno.cwd()): Workspace {
   return { root, jiraDir: join(root, ".jira"), config: result.data };
 }
 
-export const CREDENTIALS_PATH = join(
-  Deno.env.get("HOME") ?? "~",
-  ".config",
-  "jira-cli",
-  "credentials",
-);
+const configHome = () => join(Deno.env.get("HOME") ?? "~", ".config");
+
+/** Where the durable API token lives: ~/.config/jt/credentials. */
+export const credentialsPath = (): string => join(configHome(), "jt", "credentials");
+
+/**
+ * The pre-rename home, from when this tool was called jira-cli. Still read (after the
+ * current path) so an existing install keeps working untouched; never written or
+ * suggested. `jt config show` names it and points at the move.
+ */
+export const legacyCredentialsPath = (): string => join(configHome(), "jira-cli", "credentials");
 
 export function loadToken(): { token: string; source: string } {
   const env = Deno.env.get("JIRA_API_TOKEN");
   if (env && env.trim()) return { token: env.trim(), source: "env:JIRA_API_TOKEN" };
-  try {
-    const file = Deno.readTextFileSync(CREDENTIALS_PATH).trim();
-    if (file) return { token: file, source: CREDENTIALS_PATH };
-  } catch {
-    // fall through
+  for (const path of [credentialsPath(), legacyCredentialsPath()]) {
+    try {
+      const file = Deno.readTextFileSync(path).trim();
+      if (file) return { token: file, source: path };
+    } catch {
+      // absent or unreadable — try the next location
+    }
   }
   fail(
-    `no Jira API token found. Either export JIRA_API_TOKEN, or write it to ${CREDENTIALS_PATH}:\n` +
-      `  sh -c 'umask 077; mkdir -p ~/.config/jira-cli; printf "%s" "$JIRA_API_TOKEN" > ~/.config/jira-cli/credentials'`,
+    `no Jira API token found. Either export JIRA_API_TOKEN, or write it to ${credentialsPath()}:\n` +
+      `  sh -c 'umask 077; mkdir -p ~/.config/jt; printf "%s" "$JIRA_API_TOKEN" > ~/.config/jt/credentials'`,
   );
 }

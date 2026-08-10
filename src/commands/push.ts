@@ -27,6 +27,7 @@ import { JiraApiError, type JiraClient } from "../jira/client.ts";
 import { searchPage } from "../jira/search.ts";
 import { bold, cyan, dim, green, red, yellow } from "../render/colors.ts";
 import { clearPending, pidAlive, readPending, readResult, writeSpec } from "../review/handoff.ts";
+import { openerCommand, pushHandoffNotice } from "../review/nudge.ts";
 import type { Store } from "../store.ts";
 import { fetchBaseEntry, integrateFetched } from "../sync.ts";
 import { spawnReviewServer } from "./push_detach.ts";
@@ -54,7 +55,8 @@ export async function cmdPush(argv: string[]): Promise<void> {
   if (pending && pidAlive(pending.pid)) {
     fail(
       `a review is already pending: ${pending.url}\n` +
-        `  decide it there (jt await reports the outcome), or jt cancel to withdraw it`,
+        `  hand it to the user (${openerCommand(pending.url)}), then run jt await to collect\n` +
+        `  their decision — or jt cancel to withdraw it`,
     );
   }
   if (pending) clearPending(jiraDir); // stale: the server died without recording anything
@@ -78,9 +80,7 @@ export async function cmdPush(argv: string[]): Promise<void> {
   });
   const url = await spawnReviewServer(ctx.ws.root, jiraDir);
   console.log(`${bold("review page:")} ${url}`);
-  console.log(
-    dim("open it in a browser to decide — nothing is sent until Approve & push; jt await reports the outcome"),
-  );
+  console.log(pushHandoffNotice(url));
 }
 
 /** Refuse (before any mutation) if remote moved past our base for any staged ticket. */

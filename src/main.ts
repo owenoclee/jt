@@ -23,7 +23,7 @@ import { UserError } from "./errors.ts";
 import { JiraApiError } from "./jira/client.ts";
 import { bold, red } from "./render/colors.ts";
 
-export const VERSION = "0.4.0";
+export const VERSION = "0.4.1";
 
 const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit → diff → commit → push)
 
@@ -62,18 +62,20 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
     jt untrack ID...        remove all local state; Jira untouched
     jt resolve KEY          accept working file as desired state after a pull conflict
 
-  push (the only remote-mutating verb — approval-only)
+  push (the only remote-mutating verb — approval-only; ALWAYS two commands)
     jt push                 compile committed−base → serve the changeset as a browser
                             review page from a detached process; prints the URL and
                             returns immediately. ONE human decision there: Approve &
                             push (the WHOLE changeset, exactly as rendered) or Request
                             changes (nothing sent; per-ticket notes returned). The page
-                            never expires; there is no headless push.
+                            never expires; there is no headless push. NOTHING is sent by
+                            push itself — open the URL for the user, then jt await
     jt await [--timeout SECS]
                             block until the pending review settles, then report it —
                             exactly once. exit 0 pushed · 2 changes requested (notes on
                             stdout) · 1 stale/failed/cancelled. gives up harmlessly
-                            after SECS (default 600) — rerun to keep waiting
+                            after SECS (default 600) — rerun to keep waiting. A push is
+                            unfinished until this returns
     jt cancel               withdraw the pending review: stops the page, sends nothing;
                             refused once the decision has landed
     jt push --dry-run       print the compiled API ops and stop (nothing served or sent;

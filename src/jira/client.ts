@@ -58,10 +58,12 @@ export class JiraClient {
         headers: {
           Authorization: this.#authHeader,
           Accept: "application/json",
-          // Without this, a rejected request comes back in the site's default language
-          // — confirmed against a live site, where the same 404 reads
+          // Without this, a rejected request comes back in Chinese: the same 404 reads
           // "事务不存在或者您没有查看的权限。" with no Accept-Language and
           // "Issue does not exist or you do not have permission to see it." with one.
+          // This is not the site's configured language — it reproduces on two
+          // unrelated Jira Cloud sites, neither of them set to Chinese — so it seems
+          // to be what Jira falls back to when it answers an unauthenticated request.
           "Accept-Language": "en",
           ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
         },

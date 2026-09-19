@@ -42,8 +42,9 @@ Deno.test("a 401 is reported as an expired token, whatever Jira's body says", as
 Deno.test("a 404 whose auth silently failed is an auth error, not a missing issue", async () => {
   await withServer(
     () =>
-      // Verbatim from a live site: a rejected token turns every issue into a 404,
-      // localized to the site's language.
+      // Verbatim from a live site: a rejected token turns every issue into a 404.
+      // The Chinese is Jira's, not the site's — it comes back on sites that are not
+      // configured for Chinese, absent an Accept-Language header (which jt sends).
       new Response(
         JSON.stringify({ errorMessages: ["事务不存在或者您没有查看的权限。"], errors: {} }),
         {

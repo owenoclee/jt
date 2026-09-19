@@ -182,10 +182,10 @@ constructs (tables, images, raw HTML), three ADF rules catch people out:
 
 Atlassian API tokens expire, and Jira does not answer a rejected token with a clean
 error. Against a live site, a bad token gets `401` on `/myself`, `404 "issue does not
-exist or you do not have permission"` on a single issue — localized to the site's
-language unless the request asks for English — and, worst of all, `200` with an empty
-issue list on a search, as if the project had been emptied. Read by status alone, an
-expired token is indistinguishable from every ticket having been deleted.
+exist or you do not have permission"` on a single issue — in Chinese unless the request
+asks for English, whatever language the site itself is set to — and, worst of all, `200`
+with an empty issue list on a search, as if the project had been emptied. Read by status
+alone, an expired token is indistinguishable from every ticket having been deleted.
 
 Jira does mark these: every such response carries `x-seraph-loginreason:
 AUTHENTICATED_FAILED`, and a valid token never does. `jt` checks that header on every

@@ -7,8 +7,9 @@
 import { marked } from "marked";
 import { type DiffEntry, diffTickets } from "../diff.ts";
 import { lineDiff } from "../diff.ts";
+import { intentNoun } from "../intents.ts";
 import { NO_REFS, type RefContext } from "../refs.ts";
-import type { Ticket } from "../types.ts";
+import type { IntentMode, Ticket } from "../types.ts";
 
 export function escapeHtml(s: string): string {
   return s
@@ -57,7 +58,17 @@ export interface ReviewPageModel {
   tickets: {
     id: string;
     summary: string;
-    kind: "create" | "update" | "delete" | "view" | "new" | "changed" | "gone" | "conflict";
+    kind:
+      | "create"
+      | "update"
+      | "delete"
+      | "archive"
+      | "unarchive"
+      | "view"
+      | "new"
+      | "changed"
+      | "gone"
+      | "conflict";
     /** Byte-identical to what the user saw at their last review — collapsed by default. */
     unchangedSinceReview: boolean;
     diffHtml: string;
@@ -76,14 +87,26 @@ export interface ReviewPageModel {
   timeoutMs?: number;
 }
 
-/** Full diff of a ticket between two states (null = doesn't exist on that side). */
+/**
+ * Full diff of a ticket between two states (null = doesn't exist on that side). A
+ * whole-issue intent has no "to" state: `intent` says which one, so the card can name
+ * it — a deletion and an archiving are not the same promise.
+ */
 export function renderTicketDelta(
   from: Ticket | null,
   to: Ticket | null,
   refs: RefContext = NO_REFS,
+  intent?: { mode: IntentMode; summary?: string },
 ): string {
-  if (!from && !to) return "";
   if (!from && to) return renderTicketCard(to, "create", refs);
+  if (!to && intent) {
+    const summary = from?.summary ?? intent.summary ?? "";
+    const card = `<div class="${intent.mode === "delete" ? "delete" : "archive"}-card">staged ${
+      intentNoun(intent.mode)
+    }${summary ? ` of <b>${escapeHtml(summary)}</b>` : ""}</div>`;
+    return card + (from ? renderFieldRows(from, [], refs) : "");
+  }
+  if (!from && !to) return "";
   if (from && !to) {
     return `<div class="delete-card">staged deletion of <b>${escapeHtml(from.summary)}</b></div>` +
       renderFieldRows(from, [], refs);
@@ -596,6 +619,7 @@ section.ticket h3 { margin: 0; font-size: 14px; }
 .badge-create { background: var(--add-bg); color: var(--add-fg); }
 .badge-update { background: var(--card); color: var(--accent); border: 1px solid var(--border); }
 .badge-delete { background: var(--del-bg); color: var(--del-fg); }
+.badge-archive, .badge-unarchive { background: var(--info-bg); color: var(--info); }
 .badge-view { background: var(--card); color: var(--muted); border: 1px solid var(--border); }
 .badge-new { background: var(--add-bg); color: var(--add-fg); }
 .badge-changed { background: var(--info-bg); color: var(--info); }
@@ -669,6 +693,7 @@ h3 a.ref:hover { text-decoration: underline; }
 .md code, .comment code { background: var(--card); padding: 1px 4px; border-radius: 4px; }
 .create-card .badge { float: right; }
 .delete-card { background: var(--del-bg); color: var(--del-fg); padding: 10px 14px; border-radius: 6px; }
+.archive-card { background: var(--info-bg); color: var(--info); padding: 10px 14px; border-radius: 6px; }
 .withdrawn-card { color: var(--muted); border: 1px dashed var(--border); border-radius: 6px; padding: 10px 14px; }
 .nochange { color: var(--muted); }
 .frow.warn { color: var(--warn); }

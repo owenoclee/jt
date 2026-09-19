@@ -210,7 +210,7 @@ Deno.test("e2e: full lifecycle against mock Jira", async (t) => {
       await pushApproved();
       assertEquals(mock.issues.has(doomed.key), false);
       assertEquals(store.readBase(doomed.key), null);
-      assertEquals(store.readDeletions(), []);
+      assertEquals(store.readIntents(), []);
       assertEquals(mock.links.size, 0, "links to the deleted issue are gone");
     });
 

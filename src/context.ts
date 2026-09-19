@@ -19,6 +19,9 @@ export function withMeta(ctx: LocalContext): LocalContext & { meta: Meta } {
 }
 
 export function withClient<T extends LocalContext>(ctx: T): T & { client: JiraClient } {
-  const { token } = loadToken();
-  return { ...ctx, client: new JiraClient(ctx.ws.config.baseUrl, ctx.ws.config.email, token) };
+  const { token, source } = loadToken();
+  return {
+    ...ctx,
+    client: new JiraClient(ctx.ws.config.baseUrl, ctx.ws.config.email, token, source),
+  };
 }

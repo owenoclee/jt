@@ -10,11 +10,13 @@
 import { join } from "@std/path";
 import { serializeTicket } from "./canonical.ts";
 import type { Store } from "./store.ts";
-import type { Ticket } from "./types.ts";
+import type { IntentMode, Ticket } from "./types.ts";
 
 export type ChainSnapshot =
   | { kind: "ticket"; ticket: Ticket }
-  | { kind: "deletion"; summary: string }
+  // "deletion" predates archiving and is kept as the on-disk tag for every
+  // whole-issue intent; `mode` says which one (absent on pre-0.5 entries).
+  | { kind: "deletion"; mode?: IntentMode; summary: string }
   /** The ticket left the changeset without being pushed (uncommit, untrack, rebase drain). */
   | { kind: "withdrawn"; summary: string };
 
@@ -145,7 +147,7 @@ export function resetChain(store: Store): void {
 
 function changesetEmpty(store: Store): boolean {
   return store.listCommittedIds().length === 0 &&
-    !store.readDeletions().some((d) => d.committed);
+    !store.readIntents().some((i) => i.committed);
 }
 
 /**
@@ -178,14 +180,18 @@ export function writeReviewMarker(store: Store, seq: number): void {
 export function currentSnapshot(store: Store, id: string): ChainSnapshot | null {
   const committed = store.readCommitted(id);
   if (committed) return { kind: "ticket", ticket: committed.ticket };
-  const deletion = store.readDeletions().find((d) => d.key === id && d.committed);
-  if (deletion) return { kind: "deletion", summary: deletion.summary };
+  const intent = store.readIntents().find((i) => i.key === id && i.committed);
+  if (intent) return { kind: "deletion", mode: intent.mode, summary: intent.summary };
   return null;
 }
 
 export function snapshotEqual(a: ChainSnapshot | null, b: ChainSnapshot | null): boolean {
   if (a === null || b === null) return a === b;
   if (a.kind !== b.kind) return false;
+  if (a.kind === "deletion" && b.kind === "deletion") {
+    // Swapping an archiving for a deletion is a change the reviewer must see again.
+    return (a.mode ?? "delete") === (b.mode ?? "delete");
+  }
   if (a.kind !== "ticket" || b.kind !== "ticket") return true;
   return serializeTicket(a.ticket) === serializeTicket(b.ticket);
 }

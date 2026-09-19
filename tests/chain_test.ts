@@ -60,7 +60,7 @@ Deno.test("chain: append, stateAtSeq, prune, reset", () => {
 Deno.test("chain: deletion snapshots and empty appends", () => {
   const store = tempStore();
   assertEquals(appendChainEntry(store, "agent", "noop", {}), null);
-  store.writeDeletions([{ key: "TST-3", summary: "bye", requestedAt: "now", committed: true }]);
+  store.writeIntents([{ key: "TST-3", mode: "delete", summary: "bye", requestedAt: "now", committed: true }]);
   appendChainEntry(store, "agent", "stage deletion", {
     "TST-3": { kind: "deletion", summary: "bye" },
   });
@@ -68,4 +68,16 @@ Deno.test("chain: deletion snapshots and empty appends", () => {
   assertEquals(snap, { kind: "deletion", summary: "bye" });
   assert(snapshotEqual(snap, { kind: "deletion", summary: "bye" }));
   assert(!snapshotEqual(snap, null));
+});
+
+Deno.test("chain: an archiving and a deletion are not the same snapshot", () => {
+  assert(!snapshotEqual(
+    { kind: "deletion", mode: "archive", summary: "bye" },
+    { kind: "deletion", mode: "delete", summary: "bye" },
+  ));
+  // Pre-0.5 entries carry no mode and mean deletion.
+  assert(snapshotEqual(
+    { kind: "deletion", summary: "bye" },
+    { kind: "deletion", mode: "delete", summary: "bye" },
+  ));
 });

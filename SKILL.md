@@ -134,7 +134,8 @@ exactly one of them — pick by which layer you need to move:
 - `jt uncommit ID` — removes the committed copy only; the working file keeps your
   edits. Like `git restore --staged`.
 - `jt restore ID` — resets the working file to the committed copy if one is staged,
-  otherwise to base; also undoes a staged `jt rm`. Like `git checkout -- <file>`. It
+  otherwise to base; also undoes a staged `jt rm`, `jt archive` or `jt unarchive`.
+  Like `git checkout -- <file>`. It
   never touches the committed copy: to abandon a change that is already committed,
   run `jt uncommit` first, then `jt restore`.
 - `jt untrack ID` — removes every local layer for the ticket; Jira is untouched.
@@ -154,7 +155,12 @@ exactly one of them — pick by which layer you need to move:
   verify whether authentication is configured. If authentication is missing, tell the
   user to configure Jira credentials using the authentication mechanism supported by
   their `jt` installation. Do not ask them to paste credentials into chat. Continue only
-  after `jt config show` reports a credential source.
+  after `jt config show` reports a credential source. An API token expires; when one
+  has, `jt` stops every remote command with "your Jira API token was rejected". Jira
+  itself does not fail cleanly here — it answers a rejected token with 404s and empty
+  search results — so treat that error as authoritative and never as evidence that
+  tickets were deleted or a project is empty. It is a user action: tell them to mint a
+  new token and update the source `jt config show` names. Do not retry in a loop.
 - The moment `jt push` prints the review URL, open it for the user with the OS
   opener. Beyond that, never interact with a review page yourself — no fetching, no
   browser automation; the decision on it is the human's.
@@ -167,9 +173,13 @@ exactly one of them — pick by which layer you need to move:
 - Existing comments are append-only. Add a comment without an `id`; never edit or
   remove one with an `id`.
 - Existing ticket files retain their `<KEY>.json` name and `key` field.
-- Use `jt rm KEY` for remote deletion; Jira changes only after commit and push. Use
-  `jt untrack ID` to remove all local state without changing Jira. Do not hand-delete
-  tracked files.
+- To take a ticket off the board, prefer `jt archive KEY` — it is reversible
+  (`jt unarchive KEY`) and needs a Jira Premium or Enterprise plan; if the push fails
+  because the plan lacks it, say so and ask before falling back. `jt rm KEY` deletes
+  permanently and is never the default: propose archiving first, and use `jt rm` only
+  when the user asks for deletion in those words. Either way Jira changes only after
+  commit and an approved push. `jt untrack ID` removes all local state without
+  changing Jira. Do not hand-delete tracked files.
 - Check `jt status` before committing. If unrelated parked edits exist, commit explicit
   IDs rather than committing everything.
 
@@ -204,6 +214,23 @@ Markdown supports headings, paragraphs, lists, fenced code, blockquotes, rules,
 emphasis, inline code, strikethrough, and links. Tables, images, and raw HTML are
 rejected at commit. If `descriptionLossy` is true, editing `description` replaces
 remote content that Markdown could not represent.
+
+Jira stores rich text as ADF, which is stricter than Markdown in three places. Each is
+rejected at `jt commit`, naming the field, the line, and the offending text:
+
+- **A code span carries no other formatting.** `` **bold `code`** `` and
+  `` *`code`* `` are invalid; write `` **bold** `code` `` instead. A link around a
+  code span is the one legal combination: `` [`code`](https://example.com) ``.
+- **A blockquote holds only paragraphs, lists and code blocks.** No heading, rule or
+  nested quote inside `>`.
+- **A list item holds only paragraphs, lists and code blocks.** No heading, rule or
+  blockquote indented under a bullet.
+
+These are constraints of Jira's format, not of `jt`. Sent to Jira, each is refused with
+`400 INVALID_INPUT` and nothing else — no field, no line, no rule named — which is why
+they used to surface as an unexplained failure after the user had already approved the
+push. `jt commit` now refuses them first and says exactly where. Check the rendered
+result in `jt diff` before committing.
 
 ## Creating tickets
 

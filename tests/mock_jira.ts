@@ -16,6 +16,7 @@ interface MockIssue {
   storyPoints: number | null;
   comments: { id: string; author: string; created: string; body: any }[];
   updated: string;
+  archived: boolean;
 }
 
 const ISSUE_TYPES = [
@@ -41,6 +42,8 @@ export class MockJira {
   searchCommentCap: number | null = null;
   /** Simulate Jira's strict JQL validation rejecting `key in (...)` (e.g. a key no longer exists). */
   rejectKeyInSearch = false;
+  /** Archiving is a Premium/Enterprise feature; off, the archive call 400s like Jira's. */
+  archivingEnabled = true;
   #issueCounter = 1;
   #idCounter = 1000;
   #clock = 0;
@@ -63,6 +66,7 @@ export class MockJira {
       storyPoints: null,
       comments: [],
       updated: this.#tick(),
+      archived: false,
       ...overrides,
     };
     this.issues.set(issue.key, issue);
@@ -144,7 +148,8 @@ export class MockJira {
     }
     if (path === "/rest/api/3/search/jql" && req.method === "POST") {
       const jql: string = body?.jql ?? "";
-      let list = [...this.issues.values()];
+      // Archived issues drop out of search, exactly as they do in Jira.
+      let list = [...this.issues.values()].filter((i) => !i.archived);
       const proj = jql.match(/project\s*=\s*([A-Z][A-Z0-9_]*)/);
       if (proj) list = list.filter((i) => i.project === proj[1]);
       const keyIn = jql.match(/key\s+in\s+\(([^)]*)\)/i);
@@ -203,6 +208,42 @@ export class MockJira {
         }
         return new Response(null, { status: 204 });
       }
+    }
+
+    // Jira archives and unarchives through list endpoints, and answers 200 with a
+    // per-issue error report rather than failing the request outright.
+    if (
+      (path === "/rest/api/3/issue/archive" || path === "/rest/api/3/issue/unarchive") &&
+      req.method === "PUT"
+    ) {
+      const archiving = path.endsWith("/archive");
+      const keys: string[] = body?.issueIdsOrKeys ?? [];
+      if (archiving && !this.archivingEnabled) {
+        return json(
+          { errorMessages: ["Archiving issues is only available for premium editions of Jira."] },
+          400,
+        );
+      }
+      const errors: string[] = [];
+      let updated = 0;
+      for (const key of keys) {
+        const issue = this.issues.get(key);
+        if (!issue) {
+          errors.push(key);
+          continue;
+        }
+        issue.archived = archiving;
+        issue.updated = this.#tick();
+        updated++;
+      }
+      if (updated === 0) {
+        return json({ errorMessages: ["No valid issue to archive or unarchive. Bad request."] }, 400);
+      }
+      // Shape copied from a live site: {"numberOfIssuesUpdated":1,"errors":{}}
+      return json({
+        numberOfIssuesUpdated: updated,
+        errors: errors.length ? { issuesInError: errors } : {},
+      });
     }
 
     const transMatch = path.match(/^\/rest\/api\/3\/issue\/([A-Z]+-\d+)\/transitions$/);

@@ -23,6 +23,7 @@ import { pruneChain } from "../chain.ts";
 import { compilePush, type CompiledPush } from "../compile.ts";
 import { localContext, withClient, withMeta } from "../context.ts";
 import { fail } from "../errors.ts";
+import { intentFailure } from "../intents.ts";
 import { JiraApiError, type JiraClient } from "../jira/client.ts";
 import { searchPage } from "../jira/search.ts";
 import { bold, cyan, dim, green, red, yellow } from "../render/colors.ts";
@@ -236,6 +237,10 @@ export async function executePush(
         rec.body = body;
       }
       const response = await client.request(resolved.method, resolved.path, body);
+      if (resolved.kind === "archive" || resolved.kind === "unarchive") {
+        const refused = intentFailure(resolved.kind, resolved.issue, response);
+        if (refused) throw new Error(refused);
+      }
       rec.ok = true;
       rec.status = 200;
       if (resolved.kind === "create") {
@@ -276,19 +281,33 @@ export async function executePush(
   // conflict machinery here: base advances to fresh remote state; drifted working
   // edits are preserved; posted comments are de-duplicated by their markdown body.
 
-  // Deletions that succeeded: drop every trace locally.
-  for (const d of store.readDeletions().filter((d) => d.committed)) {
-    const deleted = journal.ops.some(
-      (o) => o.ok && o.method === "DELETE" && o.path.endsWith(`/issue/${d.key}`),
-    );
-    if (deleted) {
-      store.removeBase(d.key);
-      store.removeCommitted(d.key);
-      store.removeWorking(d.key);
-      store.removeSeen(d.key);
-      store.writeDeletions(store.readDeletions().filter((x) => x.key !== d.key));
-      store.writeConflicts(store.readConflicts().filter((c) => c.key !== d.key));
+  // Whole-issue intents that landed. Journal records are appended one per op, in
+  // order, so index alignment says which intent succeeded.
+  const landed = new Set(
+    ops.map((op, i) => (journal.ops[i]?.ok ? `${op.kind}:${op.issue}` : "")).filter(Boolean),
+  );
+  for (const intent of store.readIntents().filter((i) => i.committed)) {
+    if (!landed.has(`${intent.mode}:${intent.key}`)) continue;
+    store.writeIntents(store.readIntents().filter((x) => x.key !== intent.key));
+    if (intent.mode === "unarchive") {
+      // Back on the board: take a fresh snapshot so the issue is tracked like any
+      // other, instead of reappearing as news on the next pull.
+      const fresh = await tryFetch(ctx, intent.key);
+      if (fresh) {
+        store.writeBase(fresh);
+        store.writeSeen(intent.key, fresh.ticket);
+        store.writeWorking(intent.key, fresh.ticket);
+      } else {
+        console.log(yellow(`  warning: could not fetch ${intent.key} after unarchiving — jt pull`));
+      }
+      continue;
     }
+    // Deleted or archived: gone from the board either way, so every local trace goes.
+    store.removeBase(intent.key);
+    store.removeCommitted(intent.key);
+    store.removeWorking(intent.key);
+    store.removeSeen(intent.key);
+    store.writeConflicts(store.readConflicts().filter((c) => c.key !== intent.key));
   }
 
   // Creations: swap @name over to the real key.
@@ -447,11 +466,11 @@ export async function executePush(
 
   // Tickets that drained out of the changeset leave the commit chain.
   const committedNow = new Set(store.listCommittedIds());
-  const committedDeletions = new Set(
-    store.readDeletions().filter((d) => d.committed).map((d) => d.key),
+  const committedIntents = new Set(
+    store.readIntents().filter((i) => i.committed).map((i) => i.key),
   );
   const drained = [...new Set([...opOutcomes.keys(), ...refMap.keys()])].filter(
-    (id) => !committedNow.has(id) && !committedDeletions.has(id),
+    (id) => !committedNow.has(id) && !committedIntents.has(id),
   );
   pruneChain(store, drained);
 

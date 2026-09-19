@@ -134,8 +134,8 @@ Deno.test("untrack and restore of staged work also leave tombstones", async (t) 
     stage(store, one);
     stage(store, two);
     store.writeBase(makeBaseEntry(three));
-    store.writeDeletions([
-      { key: "TST-3", summary: "Three", requestedAt: "now", committed: true },
+    store.writeIntents([
+      { key: "TST-3", mode: "delete", summary: "Three", requestedAt: "now", committed: true },
     ]);
     appendChainEntry(store, "agent", "round 1", {
       "TST-1": { kind: "ticket", ticket: one },
@@ -153,7 +153,7 @@ Deno.test("untrack and restore of staged work also leave tombstones", async (t) 
 
     await t.step("restore undoing a committed deletion", () => {
       cmdRestore(["TST-3"]);
-      assertEquals(store.readDeletions(), []);
+      assertEquals(store.readIntents(), []);
       const tip = readChain(store).entries.at(-1)!;
       assertEquals(tip.note, "restore TST-3 (deletion undone)");
       assertEquals(tip.tickets["TST-3"], { kind: "withdrawn", summary: "Three" });

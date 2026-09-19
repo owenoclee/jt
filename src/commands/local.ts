@@ -1,4 +1,4 @@
-/** Local-only verbs: status, diff, show, new, rm, untrack, resolve, log, schema. */
+/** Local-only verbs: status, diff, show, new, rm, archive, unarchive, untrack, resolve, log, schema. */
 import { parseArgs } from "@std/cli";
 import { basename, join } from "@std/path";
 import { ticketsEqual } from "../canonical.ts";
@@ -8,13 +8,14 @@ import { buildCommitViews, buildSinceReview } from "../review/model.ts";
 import { localContext, withClient, withMeta } from "../context.ts";
 import { diffTickets } from "../diff.ts";
 import { fail } from "../errors.ts";
+import { COMMITTED_INTENT_STATES, intentNoun, STAGED_INTENT_STATES } from "../intents.ts";
 import { makeRefContext } from "../refs.ts";
 import { bold, cyan, dim, green, red, yellow } from "../render/colors.ts";
 import { upstreamChangeCount } from "./changes.ts";
 import { renderDiffEntries, renderJournalEntry, renderStatus, renderTicket } from "../render/render.ts";
 import { ticketJsonSchema } from "../schema.ts";
 import { fetchBaseEntry } from "../sync.ts";
-import type { Ticket } from "../types.ts";
+import type { IntentMode, Ticket } from "../types.ts";
 
 export function cmdStatus(argv: string[] = []): void {
   const args = parseArgs(argv, { boolean: ["all"] });
@@ -55,9 +56,9 @@ export function cmdDiff(argv: string[]): void {
         sections.push(renderDiffEntries(id, committed.ticket.summary, entries, refs));
       }
     }
-    for (const d of store.readDeletions().filter((d) => d.committed)) {
-      if (!wanted(d.key)) continue;
-      sections.push(`${red("will delete:")} ${bold(d.key)}  "${d.summary}"`);
+    for (const i of store.readIntents().filter((i) => i.committed)) {
+      if (!wanted(i.key)) continue;
+      sections.push(`${intentHeading(i.mode)} ${bold(i.key)}  "${i.summary}"`);
     }
   } else {
     for (const s of store.status()) {
@@ -78,8 +79,9 @@ export function cmdDiff(argv: string[]): void {
         }
         continue;
       }
-      if (s.state === "deleted") {
-        sections.push(`${red("will delete (uncommitted):")} ${bold(s.id)}  "${s.summary}"`);
+      if (STAGED_INTENT_STATES.includes(s.state)) {
+        const intent = store.readIntents().find((i) => i.key === s.id)!;
+        sections.push(`${intentHeading(intent.mode, true)} ${bold(s.id)}  "${s.summary}"`);
         continue;
       }
       if (args.all && (s.state === "committed" || s.state === "new+committed")) {
@@ -119,11 +121,12 @@ function diffWeb(
   const push = (
     id: string,
     summary: string,
-    kind: "create" | "update" | "delete",
+    kind: "create" | "update" | IntentMode,
     from: Ticket | null,
     to: Ticket | null,
   ) => {
-    const diffHtml = renderTicketDelta(from, to, refs);
+    const intent = kind === "create" || kind === "update" ? undefined : { mode: kind, summary };
+    const diffHtml = renderTicketDelta(from, to, refs, intent);
     if (diffHtml) {
       tickets.push({ id, summary, kind, unchangedSinceReview: false, diffHtml, opsJson: "" });
     }
@@ -134,11 +137,17 @@ function diffWeb(
       if (!wanted(id)) continue;
       const committed = store.readCommitted(id)!;
       const base = id.startsWith("@") ? null : store.readBase(id);
-      push(id, committed.ticket.summary, base ? "update" : "create", base?.ticket ?? null, committed.ticket);
+      push(
+        id,
+        committed.ticket.summary,
+        base ? "update" : "create",
+        base?.ticket ?? null,
+        committed.ticket,
+      );
     }
-    for (const d of store.readDeletions().filter((d) => d.committed)) {
-      if (!wanted(d.key)) continue;
-      push(d.key, d.summary, "delete", store.readBase(d.key)?.ticket ?? null, null);
+    for (const i of store.readIntents().filter((i) => i.committed)) {
+      if (!wanted(i.key)) continue;
+      push(i.key, i.summary, i.mode, store.readBase(i.key)?.ticket ?? null, null);
     }
   } else {
     for (const s of store.status()) {
@@ -146,8 +155,11 @@ function diffWeb(
       const working = store.readWorking(s.id);
       const base = s.id.startsWith("@") ? null : store.readBase(s.id);
       if (s.state === "new") push(s.id, s.summary, "create", null, working!.ticket);
-      else if (s.state === "deleted" || s.state === "deleted+committed") {
-        push(s.id, s.summary, "delete", base?.ticket ?? null, null);
+      else if (
+        STAGED_INTENT_STATES.includes(s.state) || COMMITTED_INTENT_STATES.includes(s.state)
+      ) {
+        const intent = store.readIntents().find((i) => i.key === s.id)!;
+        push(s.id, s.summary, intent.mode, base?.ticket ?? null, null);
       } else if (working && base) {
         const against = all ? base.ticket : store.readCommitted(s.id)?.ticket ?? base.ticket;
         push(s.id, working.ticket.summary, "update", against, working.ticket);
@@ -299,13 +311,17 @@ export function cmdUncommit(argv: string[]): void {
   const withdrawn: Record<string, string> = {};
   for (const raw of argv) {
     const id = raw.startsWith("@") ? raw : raw.toUpperCase();
-    const deletions = store.readDeletions();
-    const deletion = deletions.find((d) => d.key === id && d.committed);
-    if (deletion) {
-      deletion.committed = false;
-      store.writeDeletions(deletions);
-      withdrawn[id] = deletion.summary;
-      console.log(`uncommitted ${bold(id)} ${dim("(deletion intent kept, no longer staged for push)")}`);
+    const intents = store.readIntents();
+    const intent = intents.find((i) => i.key === id && i.committed);
+    if (intent) {
+      intent.committed = false;
+      store.writeIntents(intents);
+      withdrawn[id] = intent.summary;
+      console.log(
+        `uncommitted ${bold(id)} ${
+          dim(`(${intentNoun(intent.mode)} intent kept, no longer staged for push)`)
+        }`,
+      );
       continue;
     }
     const committed = store.readCommitted(id);
@@ -323,26 +339,32 @@ export function cmdUncommit(argv: string[]): void {
 /** jt restore: `git checkout -- <file>` — reset working file to committed-if-staged else base. */
 export function cmdRestore(argv: string[]): void {
   if (argv.length === 0) {
-    fail("usage: jt restore <KEY|@name...>  (discards working edits: resets to committed if staged, else to base; undoes jt rm)");
+    fail("usage: jt restore <KEY|@name...>  (discards working edits: resets to committed if staged, else to base; undoes jt rm/archive/unarchive)");
   }
   const { store } = localContext();
   for (const raw of argv) {
     const id = raw.startsWith("@") ? raw : raw.toUpperCase();
-    const deletions = store.readDeletions();
-    const deletion = deletions.find((d) => d.key === id);
-    if (deletion) {
+    const intents = store.readIntents();
+    const intent = intents.find((i) => i.key === id);
+    if (intent) {
+      const noun = intentNoun(intent.mode);
       const base = store.readBase(id);
-      if (!base) fail(`${id}: deletion staged but no base snapshot — jt untrack instead`);
-      store.writeDeletions(deletions.filter((d) => d.key !== id));
-      if (deletion.committed) {
-        withdrawFromChain(store, "agent", `restore ${id} (deletion undone)`, {
-          [id]: deletion.summary,
+      store.writeIntents(intents.filter((i) => i.key !== id));
+      if (intent.committed) {
+        withdrawFromChain(store, "agent", `restore ${id} (${noun} undone)`, {
+          [id]: intent.summary,
         });
       } else {
         pruneChain(store, [id]);
       }
-      store.writeWorking(id, base.ticket);
-      console.log(`restored ${bold(id)} ${dim("(deletion undone; working file back from base)")}`);
+      // An unarchive can be staged for a key that was never in the mirror; there is
+      // then no base to put back, and dropping the intent is the whole restore.
+      if (base) store.writeWorking(id, base.ticket);
+      console.log(
+        `restored ${bold(id)} ${
+          dim(base ? `(${noun} undone; working file back from base)` : `(${noun} undone)`)
+        }`,
+      );
       continue;
     }
     const committed = store.readCommitted(id);
@@ -357,28 +379,72 @@ export function cmdRestore(argv: string[]): void {
 }
 
 export function cmdRm(argv: string[]): void {
+  stageIntent("delete", argv);
+}
+
+export function cmdArchive(argv: string[]): void {
+  stageIntent("archive", argv);
+}
+
+export function cmdUnarchive(argv: string[]): void {
+  stageIntent("unarchive", argv);
+}
+
+const USAGE: Record<IntentMode, string> = {
+  delete:
+    "jt rm <KEY>  (stages permanent deletion; jt archive is reversible, jt untrack is local-only)",
+  archive: "jt archive <KEY>  (stages archiving — reversible with jt unarchive)",
+  unarchive: "jt unarchive <KEY>  (stages un-archiving of an archived issue)",
+};
+
+/**
+ * Stage a whole-issue intent. Nothing reaches Jira here: like every other change it
+ * waits for commit and an approved push.
+ */
+function stageIntent(mode: IntentMode, argv: string[]): void {
   const key = argv[0]?.toUpperCase();
-  if (!key) fail("usage: jt rm <KEY>  (stages remote deletion; see also jt untrack)");
+  if (!key) fail(`usage: ${USAGE[mode]}`);
   const { store } = localContext();
   if (key.startsWith("@") || !/^[A-Z][A-Z0-9_]*-\d+$/.test(key)) {
-    fail(`'${argv[0]}' is not an issue key — pending creations are just files; delete tickets/${
-      argv[0]?.replace(/^@/, "")
-    }.json and jt untrack ${argv[0]}`);
+    fail(
+      `'${argv[0]}' is not an issue key — pending creations are just files; delete tickets/${
+        argv[0]?.replace(/^@/, "")
+      }.json and jt untrack ${argv[0]}`,
+    );
   }
   const base = store.readBase(key);
-  if (!base) fail(`${key} is not tracked (no base snapshot) — jt fetch ${key} first`);
-  const deletions = store.readDeletions().filter((d) => d.key !== key);
-  deletions.push({
-    key,
-    summary: base.ticket.summary,
-    requestedAt: new Date().toISOString(),
-    committed: false,
-  });
-  store.writeDeletions(deletions);
-  store.removeWorking(key);
-  store.removeCommitted(key);
-  console.log(`${red("staged deletion")} of ${bold(key)} "${base.ticket.summary}"`);
-  console.log(dim("jt commit && jt push to delete in Jira · jt untrack to abandon"));
+  // An archived issue has usually already left the mirror, so unarchiving is the one
+  // intent that may name a key this workspace has never seen.
+  if (!base && mode !== "unarchive") {
+    fail(`${key} is not tracked (no base snapshot) — jt fetch ${key} first`);
+  }
+  const summary = base?.ticket.summary ?? "";
+  const intents = store.readIntents().filter((i) => i.key !== key);
+  intents.push({ key, mode, summary, requestedAt: new Date().toISOString(), committed: false });
+  store.writeIntents(intents);
+  if (mode !== "unarchive") {
+    store.removeWorking(key);
+    store.removeCommitted(key);
+  }
+  const named = summary ? `${bold(key)} "${summary}"` : bold(key);
+  const colour = mode === "delete" ? red : yellow;
+  console.log(`${colour(`staged ${intentNoun(mode)}`)} of ${named}`);
+  if (mode === "delete") {
+    console.log(
+      yellow("  deletion is permanent — ") +
+        dim(`jt archive ${key} is reversible and usually what you want`),
+    );
+  }
+  if (mode === "archive") {
+    console.log(dim("  archiving needs a Jira Premium or Enterprise plan"));
+  }
+  console.log(dim(`jt commit && jt push to ${mode} in Jira · jt restore ${key} to abandon`));
+}
+
+/** "will delete:" / "will archive:" — the heading a staged intent gets in jt diff. */
+function intentHeading(mode: IntentMode, uncommitted = false): string {
+  const text = `will ${mode}${uncommitted ? " (uncommitted)" : ""}:`;
+  return mode === "delete" ? red(text) : yellow(text);
 }
 
 export function cmdUntrack(argv: string[]): void {
@@ -389,18 +455,18 @@ export function cmdUntrack(argv: string[]): void {
     // Untracking something that was staged for push shrinks the changeset — record a
     // withdrawal tombstone; plain cleanup of unstaged tickets just prunes.
     const committed = store.readCommitted(id);
-    const committedDeletion = store.readDeletions().find((d) => d.key === id && d.committed);
+    const committedIntent = store.readIntents().find((i) => i.key === id && i.committed);
     store.removeWorking(id);
     store.removeCommitted(id);
     if (!id.startsWith("@")) {
       store.removeBase(id);
       store.removeSeen(id);
-      store.writeDeletions(store.readDeletions().filter((d) => d.key !== id));
+      store.writeIntents(store.readIntents().filter((i) => i.key !== id));
       store.writeConflicts(store.readConflicts().filter((c) => c.key !== id));
     }
-    if (committed || committedDeletion) {
+    if (committed || committedIntent) {
       withdrawFromChain(store, "agent", `untrack ${id}`, {
-        [id]: committed?.ticket.summary ?? committedDeletion!.summary,
+        [id]: committed?.ticket.summary ?? committedIntent!.summary,
       });
     } else {
       pruneChain(store, [id]);
@@ -411,7 +477,11 @@ export function cmdUntrack(argv: string[]): void {
 
 export async function cmdResolve(argv: string[]): Promise<void> {
   const key = argv[0]?.toUpperCase();
-  if (!key) fail("usage: jt resolve <KEY>  (after a pull conflict: accepts your working file as the desired state on top of latest remote)");
+  if (!key) {
+    fail(
+      "usage: jt resolve <KEY>  (after a pull conflict: accepts your working file as the desired state on top of latest remote)",
+    );
+  }
   const ctx = withClient(withMeta(localContext()));
   const conflict = ctx.store.readConflicts().find((c) => c.key === key);
   if (!conflict) fail(`no recorded conflict for ${key}`);
@@ -444,7 +514,9 @@ export function cmdLog(argv: string[]): void {
   }
   const shown = args.all ? entries : entries.slice(0, 10);
   console.log(
-    shown.map((e) => renderJournalEntry(e.path, e.entry, { full: Boolean(args.full) })).join("\n\n"),
+    shown.map((e) => renderJournalEntry(e.path, e.entry, { full: Boolean(args.full) })).join(
+      "\n\n",
+    ),
   );
   if (!args.all && entries.length > shown.length) {
     console.log(dim(`\n(${entries.length - shown.length} older — jt log --all)`));

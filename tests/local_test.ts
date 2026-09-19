@@ -24,8 +24,8 @@ Deno.test("untrack removes every local layer without requiring Jira access", () 
     store.writeWorking("TST-1", ticket);
     store.writeCommitted("TST-1", serializeTicket(ticket));
     store.ackSeen();
-    store.writeDeletions([
-      { key: "TST-1", summary: ticket.summary, requestedAt: "now", committed: true },
+    store.writeIntents([
+      { key: "TST-1", mode: "delete", summary: ticket.summary, requestedAt: "now", committed: true },
     ]);
     store.writeConflicts([
       { key: "TST-1", fields: ["summary"], detectedAt: "now", remote: {}, local: {} },
@@ -41,7 +41,7 @@ Deno.test("untrack removes every local layer without requiring Jira access", () 
     assertEquals(store.readCommitted("TST-1"), null);
     assertEquals(store.readBase("TST-1"), null);
     assertEquals(store.readSeen("TST-1"), null);
-    assertEquals(store.readDeletions(), []);
+    assertEquals(store.readIntents(), []);
     assertEquals(store.readConflicts(), []);
     assertEquals(readChain(store).entries, []);
   } finally {

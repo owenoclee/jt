@@ -6,6 +6,7 @@ import {
   snapshotEqual,
   stateAtSeq,
 } from "../chain.ts";
+import { intentNoun } from "../intents.ts";
 import { compareTicketIds } from "../keys.ts";
 import { NO_REFS, type RefContext } from "../refs.ts";
 import type { Store } from "../store.ts";
@@ -30,7 +31,8 @@ export function buildPageModel(
     const base = p.id.startsWith("@") ? null : store.readBase(p.id);
     const committed = store.readCommitted(p.id);
     const from = base?.ticket ?? null;
-    const to = p.kind === "delete" ? null : committed?.ticket ?? null;
+    const intentMode = p.kind === "create" || p.kind === "update" ? null : p.kind;
+    const to = intentMode ? null : committed?.ticket ?? null;
     // Collapse only on byte-identical proof: the snapshot the user last reviewed
     // equals the current tip snapshot for this ticket.
     const unchangedSinceReview = marker !== null &&
@@ -44,7 +46,12 @@ export function buildPageModel(
       summary: p.summary,
       kind: p.kind,
       unchangedSinceReview,
-      diffHtml: renderTicketDelta(from, to, refs),
+      diffHtml: renderTicketDelta(
+        from,
+        to,
+        refs,
+        intentMode ? { mode: intentMode, summary: p.summary } : undefined,
+      ),
       opsJson: JSON.stringify(
         p.ops.map((o) => ({ method: o.method, path: o.path, body: o.body })),
         null,
@@ -85,13 +92,18 @@ export function buildCommitViews(
       const prior = stateAtSeq(chain, id, entry.seq - 1);
       const base = id.startsWith("@") ? null : store.readBase(id);
       const from = snapshotTicket(prior) ?? base?.ticket ?? null;
-      const to = snap.kind === "deletion" ? null : snap.ticket;
-      const fromForDelete = from ??
-        (snap.kind === "deletion" ? ({ summary: snap.summary } as unknown as Ticket) : null);
+      if (snap.kind === "deletion") {
+        const mode = snap.mode ?? "delete";
+        return {
+          id,
+          summary: `(${intentNoun(mode)}) ${snap.summary}`,
+          html: renderTicketDelta(from, null, refs, { mode, summary: snap.summary }),
+        };
+      }
       return {
         id,
-        summary: snap.kind === "deletion" ? `(deletion) ${snap.summary}` : snap.ticket.summary,
-        html: renderTicketDelta(snap.kind === "deletion" ? fromForDelete : from, to, refs),
+        summary: snap.ticket.summary,
+        html: renderTicketDelta(from, snap.ticket, refs),
       };
     });
     return {

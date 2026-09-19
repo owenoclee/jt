@@ -245,10 +245,26 @@ Deno.test("new comments compile to comment ops; edited existing comments are fat
   await assertRejects(() => compilePush(ctx(store)), UserError, "append-only");
 });
 
+Deno.test("committed archive and unarchive intents compile to their own ops", async () => {
+  const store = tempStore();
+  store.writeIntents([
+    { key: "TST-16", mode: "archive", summary: "old", requestedAt: "now", committed: true },
+    { key: "TST-17", mode: "unarchive", summary: "back", requestedAt: "now", committed: true },
+  ]);
+  const { ops } = await compilePush(ctx(store));
+  assertEquals(ops.length, 2);
+  assertEquals(ops[0].method, "PUT");
+  assertEquals(ops[0].path, "/rest/api/3/issue/archive");
+  assertEquals(ops[0].body, { issueIdsOrKeys: ["TST-16"] });
+  assertEquals(ops[1].method, "PUT");
+  assertEquals(ops[1].path, "/rest/api/3/issue/unarchive");
+  assertEquals(ops[1].body, { issueIdsOrKeys: ["TST-17"] });
+});
+
 Deno.test("committed deletions compile to DELETE ops", async () => {
   const store = tempStore();
-  store.writeDeletions([
-    { key: "TST-15", summary: "bye", requestedAt: "now", committed: true },
+  store.writeIntents([
+    { key: "TST-15", mode: "delete", summary: "bye", requestedAt: "now", committed: true },
   ]);
   const { ops } = await compilePush(ctx(store));
   assertEquals(ops.length, 1);

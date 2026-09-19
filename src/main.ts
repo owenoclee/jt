@@ -7,6 +7,7 @@ import { cmdCommit } from "./commands/commit.ts";
 import { cmdPush } from "./commands/push.ts";
 import { cmdAwait, cmdCancel, cmdPushServe } from "./commands/push_detach.ts";
 import {
+  cmdArchive,
   cmdDiff,
   cmdLog,
   cmdNew,
@@ -16,6 +17,7 @@ import {
   cmdSchema,
   cmdShow,
   cmdStatus,
+  cmdUnarchive,
   cmdUncommit,
   cmdUntrack,
 } from "./commands/local.ts";
@@ -23,7 +25,7 @@ import { UserError } from "./errors.ts";
 import { JiraApiError } from "./jira/client.ts";
 import { bold, red } from "./render/colors.ts";
 
-export const VERSION = "0.4.1";
+export const VERSION = "0.5.0";
 
 const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit → diff → commit → push)
 
@@ -57,8 +59,10 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
     jt new NAME [--type T] [--summary S] [--parent KEY|@name]
     jt commit [ID...] [-m 'note']   stage working state into the changeset
     jt uncommit ID...       unstage (keep working edits)     [git restore --staged]
-    jt restore ID...        reset working file to committed/base; undoes jt rm
-    jt rm KEY               stage remote deletion
+    jt restore ID...        reset working file to committed/base; undoes rm/archive
+    jt archive KEY          stage archiving (reversible; Jira Premium/Enterprise)
+    jt unarchive KEY        stage un-archiving of an archived issue
+    jt rm KEY               stage permanent deletion — prefer jt archive
     jt untrack ID...        remove all local state; Jira untouched
     jt resolve KEY          accept working file as desired state after a pull conflict
 
@@ -121,6 +125,10 @@ async function main(): Promise<void> {
       return cmdRestore(rest);
     case "rm":
       return cmdRm(rest);
+    case "archive":
+      return cmdArchive(rest);
+    case "unarchive":
+      return cmdUnarchive(rest);
     case "untrack":
       return cmdUntrack(rest);
     case "resolve":

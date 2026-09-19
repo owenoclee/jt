@@ -2,6 +2,7 @@
 import { bold, cyan, dim, green, red, yellow } from "./colors.ts";
 import type { DiffEntry } from "../diff.ts";
 import { lineDiff } from "../diff.ts";
+import { COMMITTED_INTENT_STATES, STAGED_INTENT_STATES } from "../intents.ts";
 import { NO_REFS, type RefContext } from "../refs.ts";
 import type { JournalEntry, Ticket, TicketStatus } from "../types.ts";
 
@@ -20,10 +21,11 @@ export function renderStatus(statuses: TicketStatus[], opts: { all?: boolean } =
     lines.push("");
   }
   const pushable = statuses.filter((s) =>
-    ["committed", "new+committed", "deleted+committed"].includes(s.state)
+    ["committed", "new+committed", ...COMMITTED_INTENT_STATES].includes(s.state)
   ).length;
   const dirty = statuses.filter((s) =>
-    ["modified", "new", "deleted", "committed+modified", "new+committed+modified"].includes(s.state)
+    ["modified", "new", "committed+modified", "new+committed+modified", ...STAGED_INTENT_STATES]
+      .includes(s.state)
   ).length;
   const hidden = statuses.length - shown.length;
   lines.push(
@@ -53,6 +55,14 @@ function stateBadge(state: TicketStatus["state"]): string {
       return yellow("new+mod  ");
     case "deleted":
       return red("deleted  ");
+    case "archived":
+      return yellow("archived ");
+    case "archived+committed":
+      return yellow("arch+cmt ");
+    case "unarchived":
+      return cyan("unarchivd");
+    case "unarchived+committed":
+      return cyan("unarc+cmt");
     case "deleted+committed":
       return red("del+cmt  ");
     case "missing":

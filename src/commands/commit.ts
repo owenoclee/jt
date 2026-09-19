@@ -9,6 +9,7 @@ import { appendChainEntry, type ChainSnapshot } from "../chain.ts";
 import { localContext, withMeta } from "../context.ts";
 import { diffComments } from "../diff.ts";
 import { fail, UserError } from "../errors.ts";
+import { intentNoun, STAGED_INTENT_STATES } from "../intents.ts";
 import { mdToAdf } from "../adf/md_to_adf.ts";
 import { bold, dim, green } from "../render/colors.ts";
 import {
@@ -32,7 +33,8 @@ export function cmdCommit(argv: string[]): void {
   );
   const statuses = store.status();
   const committable = statuses.filter((s) =>
-    ["modified", "new", "committed+modified", "new+committed+modified", "deleted"].includes(s.state)
+    ["modified", "new", "committed+modified", "new+committed+modified", ...STAGED_INTENT_STATES]
+      .includes(s.state)
   );
   const targets = filter.length
     ? committable.filter((s) => filter.includes(s.id))
@@ -55,14 +57,14 @@ export function cmdCommit(argv: string[]): void {
   const committed: string[] = [];
   const snapshots: Record<string, ChainSnapshot> = {};
   for (const s of targets) {
-    if (s.state === "deleted") {
-      const deletions = store.readDeletions();
-      const d = deletions.find((x) => x.key === s.id);
-      if (d) {
-        d.committed = true;
-        store.writeDeletions(deletions);
-        committed.push(`${s.id} (deletion)`);
-        snapshots[s.id] = { kind: "deletion", summary: d.summary };
+    if (STAGED_INTENT_STATES.includes(s.state)) {
+      const intents = store.readIntents();
+      const intent = intents.find((x) => x.key === s.id);
+      if (intent) {
+        intent.committed = true;
+        store.writeIntents(intents);
+        committed.push(`${s.id} (${intentNoun(intent.mode)})`);
+        snapshots[s.id] = { kind: "deletion", mode: intent.mode, summary: intent.summary };
       }
       continue;
     }
@@ -94,7 +96,7 @@ function validateForCommit(store: Store, meta: Meta, id: string, t: Ticket): voi
   if (t.status) check(() => checkStatusKnown(meta, t.status!));
   if (t.priority !== null) check(() => resolvePriority(meta, t.priority!));
   if (t.sprint !== null) check(() => resolveSprint(meta, t.sprint!));
-  if (t.description !== null) check(() => mdToAdf(t.description!));
+  if (t.description !== null) check(() => mdToAdf(t.description!, "description"));
   for (const alias of Object.keys(t.fields)) check(() => resolveFieldAlias(meta, alias));
   for (const link of t.links) {
     check(() => resolveLinkType(meta, link.type));
@@ -102,7 +104,7 @@ function validateForCommit(store: Store, meta: Meta, id: string, t: Ticket): voi
       problems.push(`link target '${link.to}' has no working file`);
     }
   }
-  for (const c of t.comments) check(() => mdToAdf(c.body));
+  t.comments.forEach((c, i) => check(() => mdToAdf(c.body, `comment ${i + 1}`)));
   if (t.parent?.startsWith("@") && !store.workingExists(t.parent)) {
     problems.push(`parent '${t.parent}' has no working file`);
   }
@@ -130,6 +132,9 @@ function validateForCommit(store: Store, meta: Meta, id: string, t: Ticket): voi
   }
 
   if (problems.length) {
-    fail(`${id}: cannot commit:\n${problems.map((p) => `  - ${p}`).join("\n")}`);
+    // Problems may be several lines (a located ADF error quotes the offending
+    // markdown) — indent continuations so each stays one readable block.
+    const listed = problems.map((p) => `  - ${p.replaceAll("\n", "\n  ")}`);
+    fail(`${id}: cannot commit:\n${listed.join("\n")}`);
   }
 }

@@ -36,8 +36,8 @@ Deno.test("status: new tickets and deletions", () => {
 
   const base = makeTicket({ key: "TST-2", summary: "doomed" });
   store.writeBase(makeBaseEntry(base));
-  store.writeDeletions([
-    { key: "TST-2", summary: "doomed", requestedAt: "now", committed: false },
+  store.writeIntents([
+    { key: "TST-2", mode: "delete", summary: "doomed", requestedAt: "now", committed: false },
   ]);
   const st = store.status().find((s) => s.id === "TST-2")!;
   assertEquals(st.state, "deleted");

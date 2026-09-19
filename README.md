@@ -89,6 +89,7 @@ tickets/                 working ticket files; edit these
 .jira/config.json        workspace configuration; edit sync.jql/customFields here
 .jira/base/              remote state from the last fetch
 .jira/committed/         snapshots staged for push
+.jira/intents.json       staged archiving, un-archiving and deletion
 .jira/seen/              remote state at the last acknowledgment
 .jira/meta.json          Jira names and IDs from jt meta sync
 .jira/journal/           push requests, results, and approval provenance
@@ -137,18 +138,59 @@ example, re-parenting a tracked ticket under `@big-epic`). After a successful pu
 ## Scope and safety
 
 `jt` supports ticket creation, updates, deletion, parenting, links, labels, custom
-fields, sprint assignment, status transitions, priority, assignee, and append-only
-comments. Descriptions and comments use a deterministic Markdown/ADF subset.
+fields, sprint assignment, status transitions, priority, assignee, archiving, and
+append-only comments. Descriptions and comments use a deterministic Markdown/ADF
+subset.
 
 It does not manage boards, sprints, plans, goals, users, permissions, or workflows.
 
 - `jt push` refuses if a staged ticket changed remotely after the last fetch.
-- `jt rm KEY` stages deletion; Jira is untouched until it is committed and approved.
+- `jt archive KEY` stages archiving and `jt unarchive KEY` reverses it; `jt rm KEY`
+  stages permanent deletion. Jira is untouched until committed and approved.
 - Existing comments cannot be edited or removed.
 - Unsupported description content is marked with `descriptionLossy`.
 - Pushes are journaled with requests, outcomes, and browser approval provenance.
 
 Run `jt schema` for the strict ticket-file JSON Schema. Unknown keys are errors.
+
+## Taking tickets off the board
+
+```sh
+jt archive ENG-123      # reversible; Jira Premium/Enterprise only
+jt unarchive ENG-123    # brings it back, and back into the mirror
+jt rm ENG-123           # permanent deletion
+jt commit && jt push && jt await
+```
+
+All three are staged intents: nothing reaches Jira until the changeset is approved on
+the review page, and `jt restore KEY` abandons one beforehand.
+
+## Markdown and ADF
+
+Descriptions and comments are Markdown, stored in Jira as ADF. `jt commit` rejects
+anything ADF cannot represent, quoting the field, line, and text — rather than letting
+it fail after the reviewer has already approved the push, where Jira's entire
+explanation is `400 {"errorMessages":["INVALID_INPUT"]}`. Beyond the unsupported
+constructs (tables, images, raw HTML), three ADF rules catch people out:
+
+- a code span cannot also be bold, italic or struck through — `` **bold** `code` ``,
+  not `` **bold `code`** `` (a link around a code span is fine)
+- a blockquote holds only paragraphs, lists and code blocks
+- a list item holds only paragraphs, lists and code blocks
+
+## Expired API tokens
+
+Atlassian API tokens expire, and Jira does not answer a rejected token with a clean
+error. Against a live site, a bad token gets `401` on `/myself`, `404 "issue does not
+exist or you do not have permission"` on a single issue — localized to the site's
+language unless the request asks for English — and, worst of all, `200` with an empty
+issue list on a search, as if the project had been emptied. Read by status alone, an
+expired token is indistinguishable from every ticket having been deleted.
+
+Jira does mark these: every such response carries `x-seraph-loginreason:
+AUTHENTICATED_FAILED`, and a valid token never does. `jt` checks that header on every
+response, whatever its status, and stops with an expired-token error naming the
+credential source in use — rather than pulling an empty result set over your mirror.
 
 ## Agents
 

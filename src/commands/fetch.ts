@@ -2,6 +2,7 @@ import { parseArgs } from "@std/cli";
 import { appendChainEntry, type ChainSnapshot, withdrawFromChain } from "../chain.ts";
 import { localContext, withClient, withMeta } from "../context.ts";
 import { fail } from "../errors.ts";
+import { intentNoun } from "../intents.ts";
 import { JiraApiError, type JiraClient } from "../jira/client.ts";
 import { searchKeys, searchPage } from "../jira/search.ts";
 import { compareTicketIds } from "../keys.ts";
@@ -123,7 +124,7 @@ export async function cmdPull(argv: string[] = []): Promise<void> {
   }
 
   // Everything tracked but outside the scope: ad-hoc keys, deletion intents, departures.
-  const rest = [...new Set([...store.listBaseKeys(), ...store.readDeletions().map((d) => d.key)])]
+  const rest = [...new Set([...store.listBaseKeys(), ...store.readIntents().map((i) => i.key)])]
     .filter((k) => !scope.has(k) && !integrated.has(k));
   if (!syncJql && rest.length === 0) {
     console.log("nothing tracked — run: jt fetch <KEY...>");
@@ -264,7 +265,7 @@ function handleLeftScope(
   const working = store.readWorking(key);
   const clean = base && working && ticketsEqual(working.ticket, base.ticket) &&
     !store.listCommittedIds().includes(key) &&
-    !store.readDeletions().some((d) => d.key === key);
+    !store.readIntents().some((i) => i.key === key);
   if (clean) {
     store.removeWorking(key);
     store.removeBase(key);
@@ -279,12 +280,12 @@ function handleLeftScope(
 }
 
 function handleRemoteDeleted(store: Store, key: string): void {
-  const intent = store.readDeletions().find((d) => d.key === key);
-  if (intent) {
-    store.writeDeletions(store.readDeletions().filter((d) => d.key !== key));
+  const intent = store.readIntents().find((i) => i.key === key);
+  if (intent && intent.mode !== "unarchive") {
+    store.writeIntents(store.readIntents().filter((i) => i.key !== key));
     store.removeBase(key);
     store.removeCommitted(key);
-    console.log(`  ${key} ${dim("already deleted remotely — deletion intent cleared")}`);
+    console.log(`  ${key} ${dim(`already gone remotely — ${intentNoun(intent.mode)} intent cleared`)}`);
     return;
   }
   const base = store.readBase(key);

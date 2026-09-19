@@ -4,13 +4,14 @@
  * working tree — so a push can only ever send what was reviewed and committed.
  *
  * Op order: creates (parents first) → field updates → link adds → unlinks →
- * transitions → comments → deletes.
+ * transitions → comments → whole-issue intents (delete / archive / unarchive).
  */
 // deno-lint-ignore-file no-explicit-any
 import { mdToAdf } from "./adf/md_to_adf.ts";
 import { chunks } from "./batch.ts";
 import { fieldEqual } from "./canonical.ts";
 import { diffComments, diffTickets } from "./diff.ts";
+import { intentOp } from "./intents.ts";
 import { fail } from "./errors.ts";
 import type { JiraClient } from "./jira/client.ts";
 import {
@@ -52,11 +53,11 @@ export async function compilePush(ctx: CompileContext): Promise<CompiledPush> {
   }
 
   const committedIds = store.listCommittedIds();
-  const deletions = store.readDeletions().filter((d) => d.committed);
+  const intents = store.readIntents().filter((i) => i.committed);
   const createIds = committedIds.filter((id) => id.startsWith("@"));
   const updateKeys = committedIds.filter((id) => !id.startsWith("@"));
 
-  if (createIds.length === 0 && updateKeys.length === 0 && deletions.length === 0) {
+  if (createIds.length === 0 && updateKeys.length === 0 && intents.length === 0) {
     fail("nothing committed to push — run jt commit first (jt status to see changes)");
   }
 
@@ -104,7 +105,7 @@ export async function compilePush(ctx: CompileContext): Promise<CompiledPush> {
         issue: id,
         method: "POST",
         path: `/rest/api/3/issue/${id}/comment`,
-        body: { body: mdToAdf(cm.body) },
+        body: { body: mdToAdf(cm.body, "comment") },
         commentBody: cm.body,
       });
     }
@@ -209,26 +210,20 @@ export async function compilePush(ctx: CompileContext): Promise<CompiledPush> {
         issue: key,
         method: "POST",
         path: `/rest/api/3/issue/${key}/comment`,
-        body: { body: mdToAdf(cm.body) },
+        body: { body: mdToAdf(cm.body, "comment") },
         commentBody: cm.body,
       });
     }
   }
 
-  // ---- deletes ----
-  const deleteOps: CompiledOp[] = deletions.map((d) => ({
-    label: `delete ${d.key} ("${d.summary}")`,
-    kind: "delete",
-    issue: d.key,
-    method: "DELETE",
-    path: `/rest/api/3/issue/${d.key}`,
-  }));
+  // ---- whole-issue intents (delete / archive / unarchive) ----
+  const intentOps: CompiledOp[] = intents.map(intentOp);
 
-  const all = [...ops, ...linkOps, ...unlinkOps, ...transitionOps, ...commentOps, ...deleteOps];
+  const all = [...ops, ...linkOps, ...unlinkOps, ...transitionOps, ...commentOps, ...intentOps];
   const existingKeys = [
     ...new Set([
       ...updateKeys,
-      ...deletions.map((d) => d.key),
+      ...intents.map((i) => i.key),
     ]),
   ];
   return { ops: all, existingKeys, warnings };
@@ -270,7 +265,7 @@ async function compileCreate(
     issuetype: { id: resolveIssueType(meta, t.type).id },
     summary: t.summary,
   };
-  if (t.description !== null) fields.description = mdToAdf(t.description);
+  if (t.description !== null) fields.description = mdToAdf(t.description, "description");
   if (t.labels.length) fields.labels = [...t.labels].sort();
   if (t.priority !== null) fields.priority = { id: resolvePriority(meta, t.priority).id };
   if (t.assignee !== null) fields.assignee = { accountId: await resolveAccountId(ctx, t.assignee) };
@@ -338,7 +333,9 @@ async function compileFieldUpdates(
           `pushing replaces the whole description and that content will be lost`,
       );
     }
-    fields.description = committed.description === null ? null : mdToAdf(committed.description);
+    fields.description = committed.description === null
+      ? null
+      : mdToAdf(committed.description, "description");
   }
   if (!fieldEqual(base, committed, "labels")) fields.labels = [...committed.labels].sort();
   if (!fieldEqual(base, committed, "parent")) {

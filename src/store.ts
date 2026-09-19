@@ -5,7 +5,7 @@
  *   tickets/<name>.json       pending creation (no `key` field); referenced as "@<name>"
  *   .jira/base/<KEY>.json     remote state as of last fetch (tool-owned)
  *   .jira/committed/<id>.json approved snapshots (tool-owned byte copies of working files)
- *   .jira/deletions.json      deletion intents (jt rm)
+ *   .jira/intents.json        staged whole-issue intents (jt rm / archive / unarchive)
  *   .jira/conflicts.json      unresolved pull conflicts
  *   .jira/journal/            push audit log
  *   .jira/seen/<KEY>.json     remote state as last known to the user (ack / approved pushes)
@@ -16,10 +16,11 @@ import { serializeTicket, ticketsEqual } from "./canonical.ts";
 import { fail } from "./errors.ts";
 import { compareTicketIds } from "./keys.ts";
 import { parseTicket } from "./schema.ts";
+import { intentState } from "./intents.ts";
 import type {
   BaseEntry,
   ConflictRecord,
-  DeletionIntent,
+  IssueIntent,
   JournalEntry,
   SyncState,
   Ticket,
@@ -41,7 +42,9 @@ export class Store {
   readonly journalDir: string;
   readonly ticketsDir: string;
   readonly seenDir: string;
-  readonly deletionsFile: string;
+  readonly intentsFile: string;
+  /** Pre-0.5 home of the intents file, read once so an in-flight workspace carries over. */
+  readonly legacyDeletionsFile: string;
   readonly conflictsFile: string;
   readonly syncFile: string;
 
@@ -52,7 +55,8 @@ export class Store {
     this.journalDir = join(this.jiraDir, "journal");
     this.ticketsDir = join(root, "tickets");
     this.seenDir = join(this.jiraDir, "seen");
-    this.deletionsFile = join(this.jiraDir, "deletions.json");
+    this.intentsFile = join(this.jiraDir, "intents.json");
+    this.legacyDeletionsFile = join(this.jiraDir, "deletions.json");
     this.conflictsFile = join(this.jiraDir, "conflicts.json");
     this.syncFile = join(this.jiraDir, "sync.json");
   }
@@ -293,26 +297,36 @@ export class Store {
     Deno.writeTextFileSync(this.syncFile, JSON.stringify(state, null, 2) + "\n");
   }
 
-  // ---- deletions / conflicts ----
+  // ---- intents / conflicts ----
 
-  readDeletions(): DeletionIntent[] {
-    try {
-      return JSON.parse(Deno.readTextFileSync(this.deletionsFile)) as DeletionIntent[];
-    } catch {
-      return [];
+  readIntents(): IssueIntent[] {
+    for (const path of [this.intentsFile, this.legacyDeletionsFile]) {
+      try {
+        const raw = JSON.parse(Deno.readTextFileSync(path)) as IssueIntent[];
+        // Entries written before 0.5 predate the mode field; they were all deletions.
+        return raw.map((i) => ({ ...i, mode: i.mode ?? "delete" }));
+      } catch {
+        // absent or unreadable — try the legacy path
+      }
     }
+    return [];
   }
 
-  writeDeletions(deletions: DeletionIntent[]): void {
-    if (deletions.length === 0) {
+  writeIntents(intents: IssueIntent[]): void {
+    try {
+      Deno.removeSync(this.legacyDeletionsFile);
+    } catch {
+      // nothing to migrate
+    }
+    if (intents.length === 0) {
       try {
-        Deno.removeSync(this.deletionsFile);
+        Deno.removeSync(this.intentsFile);
       } catch {
         // already gone
       }
       return;
     }
-    Deno.writeTextFileSync(this.deletionsFile, JSON.stringify(deletions, null, 2) + "\n");
+    Deno.writeTextFileSync(this.intentsFile, JSON.stringify(intents, null, 2) + "\n");
   }
 
   readConflicts(): ConflictRecord[] {
@@ -365,14 +379,14 @@ export class Store {
     const working = new Map(this.listWorking().map((w) => [w.id, w]));
     const committedIds = new Set(this.listCommittedIds());
     const baseKeys = new Set(this.listBaseKeys());
-    const deletions = new Map(this.readDeletions().map((d) => [d.key, d]));
+    const intents = new Map(this.readIntents().map((i) => [i.key, i]));
     const conflicts = new Map(this.readConflicts().map((c) => [c.key, c]));
 
     const ids = new Set<string>([
       ...working.keys(),
       ...committedIds,
       ...baseKeys,
-      ...deletions.keys(),
+      ...intents.keys(),
     ]);
 
     const out: TicketStatus[] = [];
@@ -380,7 +394,7 @@ export class Store {
       const w = working.get(id) ?? null;
       const c = committedIds.has(id) ? this.readCommitted(id) : null;
       const base = id.startsWith("@") ? null : this.readBase(id);
-      const del = deletions.get(id);
+      const intent = intents.get(id);
       const summary = w?.ticket.summary ?? c?.ticket.summary ?? base?.ticket.summary ?? "";
 
       if (conflicts.has(id)) {
@@ -388,11 +402,11 @@ export class Store {
         out.push({ id, state: "conflict", summary, detail: `fields: ${cf.fields.join(", ")}` });
         continue;
       }
-      if (del) {
+      if (intent) {
         out.push({
           id,
-          state: del.committed ? "deleted+committed" : "deleted",
-          summary: del.summary,
+          state: intentState(intent.mode, intent.committed),
+          summary: intent.summary,
         });
         continue;
       }
@@ -401,7 +415,8 @@ export class Store {
           id,
           state: "missing",
           summary,
-          detail: "working file was deleted by hand — run `jt rm` (delete in Jira) or `jt untrack`",
+          detail:
+            "working file was deleted by hand — run `jt archive`/`jt rm` (changes Jira) or `jt untrack`",
         });
         continue;
       }

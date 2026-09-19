@@ -1,6 +1,7 @@
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { adfToMd } from "../src/adf/adf_to_md.ts";
 import { mdToAdf, UnsupportedMarkdownError } from "../src/adf/md_to_adf.ts";
+import { AdfConstraintError, validateAdf } from "../src/adf/validate.ts";
 
 /** md that is already in canonical form must round-trip byte-identically. */
 const CANONICAL_SAMPLES = [
@@ -113,4 +114,62 @@ Deno.test("code marks pick safe fences", () => {
   const { md } = adfToMd(doc);
   const back = mdToAdf(md);
   assertEquals<unknown>(back, doc);
+});
+
+Deno.test("ADF constraint violations are located, explained errors", () => {
+  const cases: { md: string; expect: RegExp }[] = [
+    { md: "intro\n\n**bold `code` here**", expect: /line 3: inline code cannot also be bold/ },
+    { md: "*ital `c`*", expect: /line 1: inline code cannot also be italic/ },
+    { md: "~~struck `c`~~", expect: /inline code cannot also be strikethrough/ },
+    { md: "> # heading in a quote", expect: /a heading cannot go inside a blockquote/ },
+    { md: "> > nested", expect: /a blockquote cannot go inside a blockquote/ },
+    { md: "> ---", expect: /a horizontal rule cannot go inside a blockquote/ },
+    { md: "- item\n\n  > quoted", expect: /a blockquote cannot go inside a list item/ },
+    { md: "- item\n  # h", expect: /a heading cannot go inside a list item/ },
+  ];
+  for (const { md, expect } of cases) {
+    const err = assertThrows(() => mdToAdf(md), AdfConstraintError, undefined, md);
+    assert(
+      expect.test((err as Error).message),
+      `${JSON.stringify(md)} → ${(err as Error).message}`,
+    );
+  }
+});
+
+Deno.test("a code span may still carry a link, and formatting outside it is fine", () => {
+  assertEquals(
+    mdToAdf("[`code`](https://x.io)").content[0].content![0].marks?.map((m) => m.type),
+    ["link", "code"],
+  );
+  assertEquals(mdToAdf("**bold** `code`").content.length, 1);
+});
+
+Deno.test("constraint errors name the field they came from", () => {
+  const err = assertThrows(() => mdToAdf("**`x`**", "description"), AdfConstraintError);
+  assert((err as Error).message.startsWith("description line 1:"), (err as Error).message);
+});
+
+Deno.test("validateAdf catches documents built outside the markdown path", () => {
+  const bad = {
+    version: 1 as const,
+    type: "doc" as const,
+    content: [
+      {
+        type: "paragraph",
+        content: [{ type: "text", text: "x", marks: [{ type: "strong" }, { type: "code" }] }],
+      },
+      { type: "blockquote", content: [{ type: "rule" }] },
+      { type: "paragraph", content: [{ type: "text", text: "" }] },
+    ],
+  };
+  const problems = validateAdf(bad);
+  assertEquals(problems.length, 3);
+  assert(problems.some((p) => p.includes("code mark cannot be combined with bold")));
+  assert(problems.some((p) => p.includes("a blockquote cannot contain a rule")));
+  assert(problems.some((p) => p.includes("empty text node")));
+});
+
+Deno.test("empty markdown runs do not produce empty ADF text nodes", () => {
+  const doc = mdToAdf("[](https://x.io)\n\ntext");
+  assertEquals(validateAdf(doc), []);
 });

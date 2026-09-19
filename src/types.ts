@@ -112,9 +112,13 @@ export interface Meta {
   boardId: number | null;
 }
 
-export interface DeletionIntent {
+export type IntentMode = "delete" | "archive" | "unarchive";
+
+/** A staged whole-issue action (`jt rm`, `jt archive`, `jt unarchive`). */
+export interface IssueIntent {
   key: string;
-  /** Summary at time of `jt rm` — shown in diffs and re-checked at push. */
+  mode: IntentMode;
+  /** Summary at time of staging — shown in diffs and on the review page. */
   summary: string;
   requestedAt: string;
   committed: boolean;
@@ -139,6 +143,10 @@ export type TicketState =
   | "new+committed+modified"
   | "deleted"
   | "deleted+committed"
+  | "archived"
+  | "archived+committed"
+  | "unarchived"
+  | "unarchived+committed"
   | "missing"
   | "conflict";
 
@@ -153,7 +161,16 @@ export interface TicketStatus {
 /** A compiled API operation. `$ref` placeholders (pending-creation keys) resolve at execution. */
 export interface CompiledOp {
   label: string;
-  kind: "create" | "update" | "transition" | "link" | "unlink" | "comment" | "delete";
+  kind:
+    | "create"
+    | "update"
+    | "transition"
+    | "link"
+    | "unlink"
+    | "comment"
+    | "delete"
+    | "archive"
+    | "unarchive";
   /** For creates: the "@<stem>" id this op's created key will be bound to. */
   refId?: string;
   /** Issue this op targets — key or "@<stem>". */

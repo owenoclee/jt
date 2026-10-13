@@ -2,6 +2,7 @@
  * Archiving end to end: stage → commit → approved push, on a mock Jira that behaves
  * like a Premium site (and, on request, like one without the feature).
  */
+import "./hermetic.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { cmdCommit } from "../src/commands/commit.ts";

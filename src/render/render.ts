@@ -3,35 +3,46 @@ import { bold, cyan, dim, green, red, yellow } from "./colors.ts";
 import type { DiffEntry } from "../diff.ts";
 import { lineDiff } from "../diff.ts";
 import { COMMITTED_INTENT_STATES, STAGED_INTENT_STATES } from "../intents.ts";
+import { DEFAULT_PROPOSAL } from "../proposal.ts";
 import { NO_REFS, type RefContext } from "../refs.ts";
-import type { JournalEntry, Ticket, TicketStatus } from "../types.ts";
+import type { JournalChange, JournalEntry, Ticket, TicketStatus } from "../types.ts";
 
-export function renderStatus(statuses: TicketStatus[], opts: { all?: boolean } = {}): string {
+export function renderStatus(
+  statuses: TicketStatus[],
+  opts: { all?: boolean; proposal?: string } = {},
+): string {
   if (statuses.length === 0) return "no tracked tickets — run: jt pull, jt fetch <KEY...> or jt new";
+  const current = opts.proposal ?? DEFAULT_PROPOSAL;
+  // Staged in a proposal other than the one this command is looking through.
+  const elsewhere = (s: TicketStatus) => s.proposal !== undefined && s.proposal !== current;
   const shown = opts.all ? statuses : statuses.filter((s) => s.state !== "clean");
   const lines: string[] = [];
+  if (current !== DEFAULT_PROPOSAL) lines.push(dim(`proposal: ${current}`));
   if (shown.length > 0) {
     const width = Math.max(...shown.map((s) => s.id.length));
     for (const s of shown) {
       const badge = stateBadge(s.state);
       const id = s.id.padEnd(width);
       const detail = s.detail ? `  ${dim(`(${s.detail})`)}` : "";
-      lines.push(`  ${badge}  ${bold(id)}  ${s.summary}${detail}`);
+      const held = elsewhere(s) ? `  ${cyan(`[proposal ${s.proposal}]`)}` : "";
+      lines.push(`  ${badge}  ${bold(id)}  ${s.summary}${detail}${held}`);
     }
     lines.push("");
   }
   const pushable = statuses.filter((s) =>
-    ["committed", "new+committed", ...COMMITTED_INTENT_STATES].includes(s.state)
+    !elsewhere(s) && ["committed", "new+committed", ...COMMITTED_INTENT_STATES].includes(s.state)
   ).length;
   const dirty = statuses.filter((s) =>
     ["modified", "new", "committed+modified", "new+committed+modified", ...STAGED_INTENT_STATES]
       .includes(s.state)
   ).length;
   const hidden = statuses.length - shown.length;
+  const others = new Set(statuses.filter(elsewhere).map((s) => s.proposal!));
   lines.push(
     dim(
       `${statuses.length} tracked · ${dirty} with uncommitted changes · ${pushable} ready to push` +
-        (hidden > 0 ? ` · ${hidden} clean (jt status --all to list)` : ""),
+        (hidden > 0 ? ` · ${hidden} clean (jt status --all to list)` : "") +
+        (others.size > 0 ? ` · other proposals: ${[...others].sort().join(", ")} (jt proposals)` : ""),
     ),
   );
   return lines.join("\n");
@@ -206,7 +217,7 @@ function indent(text: string, pad: string): string {
 export function renderJournalEntry(
   path: string,
   e: JournalEntry,
-  opts: { full?: boolean } = {},
+  opts: { full?: boolean; refs?: RefContext } = {},
 ): string {
   const lines: string[] = [];
   const badge = e.result === "success"
@@ -214,11 +225,23 @@ export function renderJournalEntry(
     : e.result === "dry-run"
     ? cyan(e.result)
     : red(e.result);
-  lines.push(`${bold(e.startedAt)}  ${badge}  ${dim(path)}`);
+  const proposal = e.proposal ? `  ${cyan(`[proposal ${e.proposal}]`)}` : "";
+  lines.push(`${bold(e.startedAt)}  ${badge}${proposal}  ${dim(path)}`);
   if (e.review) {
     const secs = (e.review.decideMs / 1000).toFixed(e.review.decideMs < 10_000 ? 1 : 0);
     const ua = e.review.userAgent ? ` · ${e.review.userAgent.slice(0, 60)}` : "";
     lines.push(`  ${dim(`approved in the browser ${secs}s after serving${ua}`)}`);
+  }
+  if (e.autoApproved) {
+    lines.push(
+      `  ${yellow("auto-allowed")} ${
+        dim(`— sent without review under your settings: ${e.autoApproved.rules.join(", ")}`)
+      }`,
+    );
+  }
+  // What it meant, ticket by ticket (entries written before 0.6 carry only the ops).
+  for (const c of e.changes ?? []) {
+    lines.push(...renderJournalChange(c, opts).map((l) => `  ${l}`));
   }
   // Compact by default: failures always get their own lines; successes fold into a count.
   const shown = opts.full ? e.ops : e.ops.filter((op) => !op.ok);
@@ -239,4 +262,32 @@ export function renderJournalEntry(
     );
   }
   return lines.join("\n");
+}
+
+/** One ticket's part of a journaled push: what changed, and how much of it landed. */
+function renderJournalChange(
+  c: JournalChange,
+  opts: { full?: boolean; refs?: RefContext },
+): string[] {
+  const id = c.key ? `${c.key} ${dim(`(${c.id})`)}` : c.id;
+  const outcome = c.applied === "all"
+    ? ""
+    : c.applied === "partial"
+    ? `  ${red("partially applied — see the failed op below")}`
+    : `  ${red("not applied")}`;
+  const wholeAuto = c.auto?.includes("*");
+  const auto = wholeAuto
+    ? `  ${dim("(auto-allowed)")}`
+    : c.auto?.length
+    ? `  ${dim(`(auto-allowed: ${c.auto.map((f) => (f === "comments" ? "comment" : f)).join(", ")})`)}`
+    : "";
+  if (c.kind === "update" && c.entries) {
+    const body = renderDiffEntries(id, c.summary, c.entries, opts.refs ?? NO_REFS, {
+      compactText: !opts.full,
+    }).split("\n");
+    body[0] += auto + outcome;
+    return body;
+  }
+  const verb = c.kind === "create" ? green("created") : c.kind === "delete" ? red("deleted") : yellow(`${c.kind}d`);
+  return [`${verb} ${bold(id)}  ${c.summary}${auto}${outcome}`];
 }

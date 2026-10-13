@@ -6,10 +6,11 @@ import { cmdFetch, cmdPull } from "./commands/fetch.ts";
 import { cmdCommit } from "./commands/commit.ts";
 import { cmdPush } from "./commands/push.ts";
 import { cmdAwait, cmdCancel, cmdPushServe } from "./commands/push_detach.ts";
+import { cmdLog } from "./commands/log.ts";
+import { cmdProposals } from "./commands/proposals.ts";
 import {
   cmdArchive,
   cmdDiff,
-  cmdLog,
   cmdNew,
   cmdResolve,
   cmdRestore,
@@ -23,15 +24,18 @@ import {
 } from "./commands/local.ts";
 import { UserError } from "./errors.ts";
 import { JiraApiError } from "./jira/client.ts";
+import { extractProposalFlag, setActiveProposal } from "./proposal.ts";
 import { bold, red } from "./render/colors.ts";
+import { startUpdateCheck, updateCheckEnabled } from "./update.ts";
+import { VERSION } from "./version.ts";
 
-export const VERSION = "0.5.0";
+export { VERSION };
 
 const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit → diff → commit → push)
 
   workspace
     jt init --base-url URL --email EMAIL --project KEY [--board ID]
-    jt config show          show config and token source
+    jt config show          show config, token source, and the user's auto-allow rules
     jt meta sync            build .jira/meta.json (fields, types, sprints, statuses...)
     jt meta show            render the alias maps
 
@@ -47,13 +51,23 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
                             the same news as a glanceable page (purple = informational,
                             nothing sent); its Acknowledge button records the ack
     jt fetch KEY... | --jql '...' [--limit N]   track tickets one by one
-    jt status [--all]       working vs committed vs base, per ticket (--all lists clean)
+    jt status [--all]       working vs committed vs base, per ticket (--all lists clean);
+                            tickets staged in another proposal are tagged with its name
     jt diff [ID...]         uncommitted changes (working vs committed/base)
     jt diff --committed     what push will send (committed vs base)
     jt diff --web           render the diff as a PR-style page (prints the file path)
     jt show ID [--base|--committed]
     jt show --web [ID...]   read-only workspace browser: rendered ticket cards
-    jt log [--all] [--full] push journal (compact; --full lists every executed op)
+    jt proposals            every proposal: what it has staged and where its review is
+
+  history (everything jt sent to Jira from this workspace)
+    jt log [KEY...] [--today | --since AGE|DATE] [--all] [--full] [--web]
+                            one entry per push, newest first: how it was approved (on
+                            the review page, or auto-allowed by the user's settings),
+                            its proposal, and what changed on each ticket. --today /
+                            --since 3d / --since 2026-10-01 pick a window; KEYs pick
+                            tickets; --full adds description line diffs and every API
+                            call; --web writes the same history as a page
 
   write (local-safe)
     jt new NAME [--type T] [--summary S] [--parent KEY|@name]
@@ -66,14 +80,30 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
     jt untrack ID...        remove all local state; Jira untouched
     jt resolve KEY          accept working file as desired state after a pull conflict
 
-  push (the only remote-mutating verb — approval-only; ALWAYS two commands)
+  proposals (parallel agents: one named changeset each — like branches)
+    -p NAME | --proposal NAME | JT_PROPOSAL=NAME
+                            a global flag for any command: commit, push, await, cancel,
+                            uncommit, diff --committed... then act on proposal NAME only.
+                            Each proposal has its own staged tickets, its own review
+                            page and its own outcome, so agents sharing a workspace
+                            never push, await or cancel each other's work. A ticket is
+                            held by one proposal at a time. With no name, commands use
+                            the default proposal. jt commit -p NAME takes explicit ids
+                            (with none: new edits to tickets NAME already holds)
+
+  push (the only remote-mutating verb — ALWAYS two commands when a review is needed)
     jt push                 compile committed−base → serve the changeset as a browser
                             review page from a detached process; prints the URL and
                             returns immediately. ONE human decision there: Approve &
                             push (the WHOLE changeset, exactly as rendered) or Request
                             changes (nothing sent; per-ticket notes returned). The page
-                            never expires; there is no headless push. NOTHING is sent by
-                            push itself — open the URL for the user, then jt await
+                            never expires. NOTHING is sent by push itself — open the
+                            URL for the user, then jt await.
+                            Exception: if EVERY change is one the user auto-allowed in
+                            ~/.config/jt/settings.json, push sends it at once and says
+                            so — no page, nothing to await. In a mixed changeset the
+                            auto-allowed changes are greyed out on the page and wait
+                            with the rest
     jt await [--timeout SECS]
                             block until the pending review settles, then report it —
                             exactly once. exit 0 pushed · 2 changes requested (notes on
@@ -83,7 +113,8 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
     jt cancel               withdraw the pending review: stops the page, sends nothing;
                             refused once the decision has landed
     jt push --dry-run       print the compiled API ops and stop (nothing served or sent;
-                            ADF bodies elided — add --full for the raw JSON)
+                            ADF bodies elided — add --full for the raw JSON); says which
+                            changes the user's settings auto-allow
 
   agents
     jt skill install <claude-code|codex>
@@ -91,10 +122,13 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
     jt skill show           print the agent skill (SKILL.md) to stdout — install
                             anywhere via a redirect
     jt schema               print the ticket file JSON Schema
+
+  jt checks GitHub once a day for a newer release and prints a one-line notice when
+  there is one. It never updates itself. JT_NO_UPDATE_CHECK=1 turns the check off.
 `;
 
-async function main(): Promise<void> {
-  const [cmd, ...rest] = Deno.args;
+async function main(argv: string[]): Promise<void> {
+  const [cmd, ...rest] = argv;
   switch (cmd) {
     case "init":
       return cmdInit(rest);
@@ -143,6 +177,8 @@ async function main(): Promise<void> {
       return await cmdPushServe();
     case "log":
       return cmdLog(rest);
+    case "proposals":
+      return cmdProposals();
     case "skill":
       return cmdSkill(rest);
     case "schema":
@@ -164,7 +200,12 @@ async function main(): Promise<void> {
 
 if (import.meta.main) {
   try {
-    await main();
+    // -p/--proposal is global: it scopes whichever command follows to one proposal.
+    const { proposal, rest } = extractProposalFlag(Deno.args);
+    if (proposal !== null) setActiveProposal(proposal);
+    const advise = updateCheckEnabled(rest[0]) ? startUpdateCheck(rest[0]) : null;
+    await main(rest);
+    await advise?.();
   } catch (e) {
     if (e instanceof UserError || e instanceof JiraApiError) {
       console.error(red(`error: ${e.message}`));

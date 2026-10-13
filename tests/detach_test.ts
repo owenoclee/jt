@@ -4,6 +4,7 @@
  * with the old blocking-push exit-code semantics. Approve, request-changes, and the
  * one-review-at-a-time guard are all driven over real HTTP against the mock Jira.
  */
+import "./hermetic.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { cmdCommit } from "../src/commands/commit.ts";

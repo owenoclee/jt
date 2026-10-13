@@ -4,6 +4,8 @@
  * layers (working / committed / base) so layers can be byte- and field-compared.
  */
 
+import type { DiffEntry } from "./diff.ts";
+
 export interface LinkEntry {
   /** Link direction phrase as Jira displays it, e.g. "blocks", "is blocked by", "relates to". */
   type: string;
@@ -156,6 +158,8 @@ export interface TicketStatus {
   state: TicketState;
   summary: string;
   detail?: string;
+  /** The proposal holding this ticket's staged change; absent when nothing is staged. */
+  proposal?: string;
 }
 
 /** A compiled API operation. `$ref` placeholders (pending-creation keys) resolve at execution. */
@@ -195,16 +199,45 @@ export interface JournalOpResult {
   error?: string;
 }
 
+/**
+ * What a push did to one ticket, in the diff's own terms — captured before sending,
+ * because base advances afterwards and the delta is no longer derivable. This is the
+ * record `jt log` renders: the ops say what was sent, this says what it meant.
+ */
+export interface JournalChange {
+  /** Id at push time: the issue key, or "@name" for a creation. */
+  id: string;
+  /** The key Jira assigned, for creations that landed. */
+  key?: string;
+  summary: string;
+  kind: "create" | "update" | IntentMode;
+  /** Updates: the field-level delta that was sent. */
+  entries?: DiffEntry[];
+  /** Creations: the ticket as proposed. */
+  ticket?: Ticket;
+  /** Diff field names the user's settings auto-allowed; ["*"] = the whole ticket. */
+  auto?: string[];
+  /** How much of this ticket's delta Jira accepted. */
+  applied: "all" | "partial" | "none";
+}
+
 export interface JournalEntry {
   startedAt: string;
   finishedAt?: string;
   result: "success" | "partial" | "dry-run";
+  /** The proposal that was pushed; absent for the default proposal and older entries. */
+  proposal?: string;
   /**
-   * Approval provenance, recorded server-side at the decision POST. Every push goes
-   * through the review page, so its absence — or an implausibly fast decideMs / non-
-   * browser userAgent — is tamper evidence, not a normal state.
+   * Approval provenance, recorded server-side at the decision POST. A push is either
+   * decided on the review page (this) or sent unreviewed under the user's auto-allow
+   * rules (`autoApproved`); an entry with neither — or an implausibly fast decideMs /
+   * non-browser userAgent — is tamper evidence, not a normal state.
    */
   review?: { decidedAt: string; decideMs: number; userAgent: string | null };
+  /** Set when no human decided: every change matched the user's auto-allow rules. */
+  autoApproved?: { settings: string; rules: string[] };
+  /** Per-ticket record of what changed; absent on entries written before 0.6. */
+  changes?: JournalChange[];
   ops: JournalOpResult[];
   created?: Record<string, string>;
   error?: string;

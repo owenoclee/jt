@@ -1,6 +1,8 @@
 /** Groups compiled ops into per-ticket plans for review-page rendering. */
+import { type AutoVerdict, NO_AUTO } from "../autoallow.ts";
+import { diffTickets } from "../diff.ts";
 import type { Store } from "../store.ts";
-import type { CompiledOp, IntentMode } from "../types.ts";
+import type { CompiledOp, IntentMode, JournalChange } from "../types.ts";
 
 export interface TicketPlan {
   id: string;
@@ -24,6 +26,34 @@ export function buildTicketPlans(store: Store, ops: CompiledOp[]): TicketPlan[] 
     plan.summary = summaryOf(store, plan.id);
   }
   return [...byId.values()];
+}
+
+/**
+ * The journal's per-ticket record of a changeset, taken from the layers as they stand
+ * BEFORE the push settles them. `applied` starts pessimistic; executePush fills it in.
+ */
+export function describeChanges(
+  store: Store,
+  plans: TicketPlan[],
+  verdict: AutoVerdict = NO_AUTO,
+): JournalChange[] {
+  return plans.map((p) => {
+    const auto = verdict.tickets[p.id]?.auto ?? [];
+    const change: JournalChange = {
+      id: p.id,
+      summary: p.summary,
+      kind: p.kind,
+      ...(auto.length ? { auto } : {}),
+      applied: "none",
+    };
+    const committed = store.readCommitted(p.id);
+    if (p.kind === "create" && committed) change.ticket = committed.ticket;
+    if (p.kind === "update" && committed) {
+      const base = store.readBase(p.id);
+      if (base) change.entries = diffTickets(base.ticket, committed.ticket);
+    }
+    return change;
+  });
 }
 
 function planKind(op: CompiledOp): TicketPlan["kind"] {

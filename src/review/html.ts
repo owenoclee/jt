@@ -71,6 +71,8 @@ export interface ReviewPageModel {
       | "conflict";
     /** Byte-identical to what the user saw at their last review — collapsed by default. */
     unchangedSinceReview: boolean;
+    /** Every change on this ticket is auto-allowed by the user's settings: greyed out. */
+    autoAllowed?: boolean;
     diffHtml: string;
     opsJson: string;
   }[];
@@ -97,6 +99,7 @@ export function renderTicketDelta(
   to: Ticket | null,
   refs: RefContext = NO_REFS,
   intent?: { mode: IntentMode; summary?: string },
+  autoFields?: Set<string>,
 ): string {
   if (!from && to) return renderTicketCard(to, "create", refs);
   if (!to && intent) {
@@ -113,7 +116,7 @@ export function renderTicketDelta(
   }
   const entries = diffTickets(from!, to!);
   if (entries.length === 0) return `<div class="nochange">no changes</div>`;
-  return renderFieldRows(to!, entries, refs);
+  return renderFieldRows(to!, entries, refs, autoFields);
 }
 
 /**
@@ -123,14 +126,20 @@ export function renderTicketDelta(
  * reviewer learn where each field lives on the card. Context rows carry
  * data-ctx-field for the ⚙ panel and stay hidden until its script applies the saved
  * preferences.
+ *
+ * The one exception to the fixed order: changes the user's settings auto-allow
+ * (`autoFields`) leave their slot and gather at the bottom, greyed out under a hint —
+ * so what is left in place is precisely what still needs a decision.
  */
 export function renderFieldRows(
   t: Ticket,
   entries: DiffEntry[],
   refs: RefContext = NO_REFS,
+  autoFields: Set<string> = new Set(),
 ): string {
   const byField = new Map<string, DiffEntry>(entries.map((e) => [e.field, e]));
   const rows: string[] = [];
+  const autoRows: string[] = [];
   const none = (label = "none") => `<i class="none">${label}</i>`;
   const ctx = (field: string, html: string, block = false) =>
     rows.push(
@@ -142,7 +151,7 @@ export function renderFieldRows(
   // Renders the diff rows at this field's canonical slot; reports whether it was changed.
   const changed = (field: string): boolean => {
     const e = byField.get(field);
-    if (e) rows.push(...changedRows(e, refs));
+    if (e) (autoFields.has(field) ? autoRows : rows).push(...changedRows(e, refs));
     return e !== undefined;
   };
 
@@ -194,6 +203,25 @@ export function renderFieldRows(
     ctx("description", `<div class="desc md ctxval">${mdToHtml(t.description)}</div>`, true);
   }
   changed("comments"); // existing comments are never context — only diffs render
+  if (autoRows.length) {
+    rows.push(`<div class="auto-rows"><div class="auto-hint">${AUTO_HINT}</div>${autoRows.join("\n")}</div>`);
+  }
+  return rows.join("\n");
+}
+
+export const AUTO_HINT = "auto-allowed based on your configuration";
+
+/** The diff rows for a recorded delta alone, no ticket around them (jt log --web). */
+export function renderEntryRows(
+  entries: DiffEntry[],
+  refs: RefContext = NO_REFS,
+  autoFields: Set<string> = new Set(),
+): string {
+  const rows = entries.filter((e) => !autoFields.has(e.field)).flatMap((e) => changedRows(e, refs));
+  const auto = entries.filter((e) => autoFields.has(e.field)).flatMap((e) => changedRows(e, refs));
+  if (auto.length) {
+    rows.push(`<div class="auto-rows"><div class="auto-hint">${AUTO_HINT}</div>${auto.join("\n")}</div>`);
+  }
   return rows.join("\n");
 }
 
@@ -328,8 +356,14 @@ export function renderPage(model: ReviewPageModel): string {
       }" target="_blank" rel="noopener">${escapeHtml(id)}</a>`;
     return `<h3>${label} <span class="summary" title="${escapeHtml(summary)}">${escapeHtml(summary)}</span></h3>`;
   };
-  const ticketCards = model.tickets.map((t) => {
+  const firstAuto = model.tickets.findIndex((t) => t.autoAllowed);
+  const ticketCards = model.tickets.map((t, index) => {
     const collapsed = t.unchangedSinceReview;
+    // Auto-allowed cards sort last (see buildPageModel); one divider introduces them.
+    const divider = t.autoAllowed && index === firstAuto && firstAuto > 0
+      ? `<div class="auto-divider">${AUTO_HINT} — sent with the rest when you approve</div>`
+      : "";
+    const autoBadge = t.autoAllowed ? `<span class="auto-tag">${AUTO_HINT}</span>` : "";
     const unchangedBadge = collapsed
       ? `<span class="unchanged">unchanged since your last review ✓
            <button class="expand" type="button">expand</button></span>`
@@ -341,12 +375,13 @@ export function renderPage(model: ReviewPageModel): string {
       } (returned to the agent when you request changes)">
         </div>`
       : "";
-    return `<section class="ticket${collapsed ? " collapsed" : ""}" id="t-${
-      escapeHtml(t.id)
-    }" data-id="${escapeHtml(t.id)}">
+    return `${divider}<section class="ticket${collapsed ? " collapsed" : ""}${
+      t.autoAllowed ? " auto-allowed" : ""
+    }" id="t-${escapeHtml(t.id)}" data-id="${escapeHtml(t.id)}">
       <header${collapsed ? ' class="oneline"' : ""}>
         <span class="badge badge-${t.kind}">${t.kind}</span>
         ${heading(t.id, t.summary)}
+        ${autoBadge}
         ${unchangedBadge}
       </header>
       <div class="body">${t.diffHtml}</div>
@@ -579,7 +614,7 @@ ${infoJs}
 </html>`;
 }
 
-const CSS = `
+export const CSS = `
 :root {
   --bg: #ffffff; --fg: #1f2328; --muted: #656d76; --border: #d1d9e0;
   --card: #f6f8fa; --add-bg: #dafbe1; --add-fg: #116329; --del-bg: #ffebe9; --del-fg: #82071e;
@@ -696,6 +731,15 @@ h3 a.ref:hover { text-decoration: underline; }
 .archive-card { background: var(--info-bg); color: var(--info); padding: 10px 14px; border-radius: 6px; }
 .withdrawn-card { color: var(--muted); border: 1px dashed var(--border); border-radius: 6px; padding: 10px 14px; }
 .nochange { color: var(--muted); }
+/* Auto-allowed by the user's settings: present and readable, but out of the way — the
+   reviewer's attention belongs to everything that is not greyed. */
+.auto-rows { flex-basis: 100%; margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--border); opacity: .55; }
+.auto-rows:first-child { margin-top: 0; padding-top: 0; border-top: none; }
+.auto-rows:hover, section.ticket.auto-allowed:hover { opacity: .9; }
+.auto-hint, .auto-tag { font-size: 11px; color: var(--muted); font-style: italic; }
+.auto-tag { margin-left: auto; white-space: nowrap; }
+section.ticket.auto-allowed { opacity: .55; }
+.auto-divider { color: var(--muted); font-size: 12px; margin: 24px 0 10px; padding-top: 12px; border-top: 1px dashed var(--border); }
 .frow.warn { color: var(--warn); }
 details.ops { border-top: 1px solid var(--border); padding: 8px 14px; }
 details.ops summary { cursor: pointer; color: var(--muted); font-size: 12px; }

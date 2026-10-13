@@ -43,7 +43,7 @@ export function loadWorkspace(cwd = Deno.cwd()): Workspace {
   return { root, jiraDir: join(root, ".jira"), config: result.data };
 }
 
-const configHome = () => join(Deno.env.get("HOME") ?? "~", ".config");
+export const configHome = () => join(Deno.env.get("HOME") ?? "~", ".config");
 
 /** Where the durable API token lives: ~/.config/jt/credentials. */
 export const credentialsPath = (): string => join(configHome(), "jt", "credentials");

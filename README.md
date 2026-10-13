@@ -5,7 +5,8 @@ JSON files, and changes follow a fetch → edit → diff → commit → push cyc
 
 `jt push` reads only committed snapshots, shows the exact changeset in a local browser
 review page, and sends it only after the user approves the whole batch. No other command
-mutates Jira.
+mutates Jira. The one way past the page is a rule the user wrote themselves: kinds of
+change they have [auto-allowed](#auto-allowed-changes) are sent without asking.
 
 ## Install
 
@@ -13,6 +14,13 @@ On macOS, install with Homebrew:
 
 ```sh
 brew install owenoclee/tap/jt
+```
+
+Release candidates are never installed by that formula. To opt in to them, install the
+separate `jt-rc` formula instead (`brew uninstall jt` first — both provide `jt`):
+
+```sh
+brew install owenoclee/tap/jt-rc
 ```
 
 Alternatively, download a macOS or Linux archive and its checksum from the
@@ -80,6 +88,104 @@ context in place; the ⚙ **fields** control picks which unchanged fields appear
 Use `jt push --dry-run` to print the compiled API operations without serving a
 page or sending anything.
 
+## Parallel agents: proposals
+
+A proposal is a named changeset — its own staged tickets, its own review page, its own
+outcome. They are to `jt` what branches are to git, and they exist so that several agents
+can work in one workspace at once: without them there is one changeset and one review,
+and a second agent's `jt commit` or `jt push` lands in the first agent's.
+
+Name the proposal on any command with `-p NAME` (or `--proposal NAME`, or
+`JT_PROPOSAL=NAME` in the environment):
+
+```sh
+jt commit -p auth-cleanup ENG-12 ENG-15 -m "tighten session handling"
+jt push   -p auth-cleanup        # its own review page
+jt await  -p auth-cleanup        # its own outcome
+
+jt commit -p q3-epics @q3-epic @first-story     # meanwhile, another agent
+jt push   -p q3-epics && jt await -p q3-epics
+```
+
+- Each proposal is reviewed, approved, cancelled and collected on its own. Any number
+  can have a review page open at once; the page title names the proposal.
+- A ticket is held by **one proposal at a time**. There is a single `tickets/KEY.json`,
+  so a second proposal trying to stage it is refused and told who holds it. `jt uncommit
+  KEY -p NAME` releases it.
+- `jt commit -p NAME` takes explicit ids. With none, it commits only new edits to tickets
+  `NAME` already holds — never "everything modified", which in a shared workspace is
+  other agents' unfinished work.
+- `jt status` shows the whole workspace and tags tickets staged elsewhere with
+  `[proposal NAME]`; `jt proposals` lists every proposal with its tickets and review.
+- There is deliberately no "current proposal" to switch: that would be shared state, and
+  agents switching it under each other is the very clash this removes. The name travels
+  with each command.
+
+Commands without a name use the default proposal, which behaves exactly as `jt` always
+has. A named proposal's directory disappears once it has been pushed and collected.
+
+## Auto-allowed changes
+
+Some changes are not worth a review — an agent assigning itself a ticket, moving it to
+*In Progress*, leaving a comment. You can allow those, by kind, in a settings file:
+
+```jsonc
+// ~/.config/jt/settings.json
+{
+  "autoAllow": [
+    "assignee",
+    "comment",
+    { "action": "status", "to": ["In Progress", "In Review"] },
+    { "action": "labels", "project": "SBX" }
+  ]
+}
+```
+
+- When **every** change in a push is auto-allowed, `jt push` sends it immediately: no
+  review page, nothing to `jt await`.
+- When auto-allowed changes are **mixed** with others, nothing is sent early. The whole
+  changeset goes to the review page as usual; the auto-allowed changes sit at the bottom
+  — of the card, or of the page when a whole ticket is covered — greyed out and marked
+  *auto-allowed based on your configuration*. Approving sends everything; requesting
+  changes sends nothing.
+
+A rule is an action name, or an object that narrows it:
+
+| Action | Covers |
+| --- | --- |
+| `summary` `description` `type` `labels` `parent` `sprint` `assignee` `priority` | an edit to that field of an existing ticket |
+| `status` | a workflow transition; `"to": [...]` limits it to transitions *into* those statuses |
+| `comment` | a new comment |
+| `links` | adding or removing an issue link |
+| `fields.<alias>`, `fields.*` | a tracked custom field, or all of them |
+| `create` `archive` `unarchive` | the whole operation on a ticket |
+
+`"project": "KEY"` limits any rule to one project. Deletion can never be auto-allowed,
+and neither can replacing a description `jt` could only partly read (`descriptionLossy`).
+A settings file with a mistake in it stops `jt push` with the reason rather than being
+ignored. `jt config show` prints the rules in force.
+
+This file is yours, not the agent's: it lives outside every workspace, next to the
+credentials, and the agent contract forbids touching it. Every push it lets through is
+recorded as such — see below.
+
+## History
+
+`jt log` is the record of everything `jt` has sent to Jira from a workspace:
+
+```sh
+jt log --today               # what happened today?
+jt log --since 3d ENG-123    # the last three days, for one ticket
+jt log --web --today         # the same, as a page (prints the file path)
+jt log --full                # description line diffs and every API call
+```
+
+Each push is listed with how it was approved — decided on the review page (and how long
+the decision took), or sent without review under your auto-allow rules (and which rules)
+— the proposal it came from, and the field-level change to every ticket, with
+auto-allowed changes marked. The underlying journal in `.jira/journal/` also holds each
+request and Jira's response.
+
 ## Workspaces
 
 `jt init` creates:
@@ -90,9 +196,10 @@ tickets/                 working ticket files; edit these
 .jira/base/              remote state from the last fetch
 .jira/committed/         snapshots staged for push
 .jira/intents.json       staged archiving, un-archiving and deletion
+.jira/proposals/<name>/  a named proposal's own committed/, intents and review state
 .jira/seen/              remote state at the last acknowledgment
 .jira/meta.json          Jira names and IDs from jt meta sync
-.jira/journal/           push requests, results, and approval provenance
+.jira/journal/           every push: requests, results, changes, and how it was approved
 ```
 
 Files under `.jira/` are tool-owned except `.jira/config.json`.
@@ -149,7 +256,10 @@ It does not manage boards, sprints, plans, goals, users, permissions, or workflo
   stages permanent deletion. Jira is untouched until committed and approved.
 - Existing comments cannot be edited or removed.
 - Unsupported description content is marked with `descriptionLossy`.
-- Pushes are journaled with requests, outcomes, and browser approval provenance.
+- Pushes are journaled with requests, outcomes, per-ticket changes, and how each was
+  approved: browser provenance for a reviewed push, the matching rules for an
+  auto-allowed one. `jt log` reads it back.
+- Deletion always goes to the review page; no setting can auto-allow it.
 
 Run `jt schema` for the strict ticket-file JSON Schema. Unknown keys are errors.
 
@@ -197,11 +307,22 @@ credential source in use — rather than pulling an empty result set over your m
 [SKILL.md](SKILL.md) is the agent contract. Install it with `jt skill install
 claude-code` or `jt skill install codex`, or print it with `jt skill show` and
 redirect it wherever your agent discovers skills. Allow local/read-only `jt` commands
-as appropriate. `jt push` is the only command
-that can mutate Jira and it always requires user confirmation through the browser UI.
+as appropriate. `jt push` is the only command that can mutate Jira, and it requires user
+confirmation through the browser UI for everything except the kinds of change you have
+auto-allowed in `~/.config/jt/settings.json`.
 
 The user should create the credential directly; an agent should never ask for, read,
-or print the API token.
+or print the API token — and should never create or edit the settings file.
+
+## Updates
+
+`jt` asks GitHub at most once a day whether a newer release exists and, when one does,
+prints a short notice on stderr with the command to update — at most once a day. It never
+downloads or installs anything. A stable build is only told about stable releases; a
+release-candidate build is told about newer candidates too.
+
+Turn the check off with `JT_NO_UPDATE_CHECK=1`, or `"updateCheck": false` in
+`~/.config/jt/settings.json`. It is also skipped when `CI` is set.
 
 ## Development
 

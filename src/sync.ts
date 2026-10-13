@@ -177,9 +177,14 @@ export type IntegrateResult =
  * (and committed) copies; overlapping edits become a conflict record and nothing moves.
  * Comments merge structurally (remote comments + local id-less additions) — append-only
  * data can't conflict.
+ *
+ * Callable with a store scoped to any proposal: the ticket's own holder is looked up.
  */
-export function integrateFetched(store: Store, fresh: BaseEntry): IntegrateResult {
+export function integrateFetched(anyStore: Store, fresh: BaseEntry): IntegrateResult {
   const key = fresh.key;
+  // The committed copy to rebase is wherever the ticket is staged — which may be a
+  // proposal other than the one this command was run for.
+  const store = anyStore.holder(key);
   const old = store.readBase(key);
   const working = store.readWorking(key);
   const committed = store.readCommitted(key);

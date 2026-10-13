@@ -14,6 +14,7 @@ import { diffComments, diffTickets } from "./diff.ts";
 import { intentOp } from "./intents.ts";
 import { fail } from "./errors.ts";
 import type { JiraClient } from "./jira/client.ts";
+import { DEFAULT_PROPOSAL, proposalFlag } from "./proposal.ts";
 import {
   checkStatusKnown,
   resolveFieldAlias,
@@ -44,7 +45,16 @@ export async function compilePush(ctx: CompileContext): Promise<CompiledPush> {
   const { store, meta } = ctx;
   ctx.accountIds ??= new Map();
 
-  const conflicts = store.readConflicts();
+  const committedIds = store.listCommittedIds();
+  const intents = store.readIntents().filter((i) => i.committed);
+  const createIds = committedIds.filter((id) => id.startsWith("@"));
+  const updateKeys = committedIds.filter((id) => !id.startsWith("@"));
+
+  // Conflicts block the tickets they are on. A conflict on a ticket outside this
+  // changeset — another agent's, in another proposal or not staged at all — is not
+  // this push's to resolve, and must not hold it up.
+  const staged = new Set([...updateKeys, ...intents.map((i) => i.key)]);
+  const conflicts = store.readConflicts().filter((c) => staged.has(c.key));
   if (conflicts.length > 0) {
     fail(
       `unresolved conflicts on: ${conflicts.map((c) => c.key).join(", ")} — ` +
@@ -52,13 +62,20 @@ export async function compilePush(ctx: CompileContext): Promise<CompiledPush> {
     );
   }
 
-  const committedIds = store.listCommittedIds();
-  const intents = store.readIntents().filter((i) => i.committed);
-  const createIds = committedIds.filter((id) => id.startsWith("@"));
-  const updateKeys = committedIds.filter((id) => !id.startsWith("@"));
-
   if (createIds.length === 0 && updateKeys.length === 0 && intents.length === 0) {
-    fail("nothing committed to push — run jt commit first (jt status to see changes)");
+    const flag = proposalFlag(store.proposal);
+    const here = store.proposal === DEFAULT_PROPOSAL ? "" : ` in proposal '${store.proposal}'`;
+    const elsewhere = store.listProposals().filter((name) => {
+      if (name === store.proposal) return false;
+      const s = store.scoped(name);
+      return s.listCommittedIds().length > 0 || s.readIntents().some((i) => i.committed);
+    });
+    fail(
+      `nothing committed to push${here} — run jt commit${flag} first (jt status to see changes)` +
+        (elsewhere.length
+          ? `\n  staged in other proposals: ${elsewhere.join(", ")} — push one with jt push -p <name>`
+          : ""),
+    );
   }
 
   const warnings: string[] = [];

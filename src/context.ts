@@ -1,5 +1,6 @@
 import { loadToken, loadWorkspace, type Workspace } from "./config.ts";
 import { JiraClient } from "./jira/client.ts";
+import { activeProposal } from "./proposal.ts";
 import { loadMeta } from "./resolve.ts";
 import { Store } from "./store.ts";
 import type { Meta } from "./types.ts";
@@ -11,7 +12,7 @@ export interface LocalContext {
 
 export function localContext(): LocalContext {
   const ws = loadWorkspace();
-  return { ws, store: new Store(ws.root) };
+  return { ws, store: new Store(ws.root, activeProposal()) };
 }
 
 export function withMeta(ctx: LocalContext): LocalContext & { meta: Meta } {

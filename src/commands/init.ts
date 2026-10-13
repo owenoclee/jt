@@ -1,7 +1,8 @@
 import { parseArgs } from "@std/cli";
 import { join } from "@std/path";
 import { credentialsPath, legacyCredentialsPath, loadToken, loadWorkspace } from "../config.ts";
-import { fail } from "../errors.ts";
+import { fail, UserError } from "../errors.ts";
+import { describeRule, loadSettings, settingsPath } from "../settings.ts";
 import { Store } from "../store.ts";
 
 export function cmdInit(argv: string[]): void {
@@ -71,5 +72,17 @@ export function cmdConfigShow(): void {
     }
   } catch {
     console.log(`token: MISSING — export JIRA_API_TOKEN or write ${credentialsPath()}`);
+  }
+  // The user's own file, shown so anyone can see what push will send without asking.
+  try {
+    const { autoAllow } = loadSettings();
+    console.log(
+      `auto-allow: ${
+        autoAllow.length ? autoAllow.map(describeRule).join(", ") : "none — every push is reviewed"
+      } (${settingsPath()})`,
+    );
+  } catch (e) {
+    if (!(e instanceof UserError)) throw e;
+    console.log(`auto-allow: INVALID — ${e.message}`);
   }
 }

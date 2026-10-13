@@ -5,6 +5,7 @@
  * an existing ticket onto a pending creation, including @ref rewriting of the
  * committed layer after a partial failure.
  */
+import "./hermetic.ts";
 import { assert, assertEquals } from "@std/assert";
 import { cmdChanges, upstreamChangeCount } from "../src/commands/changes.ts";
 import { cmdCommit } from "../src/commands/commit.ts";

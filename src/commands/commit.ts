@@ -10,6 +10,7 @@ import { localContext, withMeta } from "../context.ts";
 import { diffComments } from "../diff.ts";
 import { fail, UserError } from "../errors.ts";
 import { intentNoun, STAGED_INTENT_STATES } from "../intents.ts";
+import { DEFAULT_PROPOSAL, explicitProposalFlag, proposalFlag } from "../proposal.ts";
 import { mdToAdf } from "../adf/md_to_adf.ts";
 import { bold, dim, green } from "../render/colors.ts";
 import {
@@ -32,21 +33,47 @@ export function cmdCommit(argv: string[]): void {
     a.startsWith("@") ? a : a.toUpperCase()
   );
   const statuses = store.status();
+  const mine = store.proposal;
+  const flag = proposalFlag(mine);
+  const heldElsewhere = (s: { proposal?: string }) => s.proposal !== undefined && s.proposal !== mine;
   const committable = statuses.filter((s) =>
     ["modified", "new", "committed+modified", "new+committed+modified", ...STAGED_INTENT_STATES]
       .includes(s.state)
   );
-  const targets = filter.length
-    ? committable.filter((s) => filter.includes(s.id))
-    : committable;
 
   if (filter.length) {
     for (const f of filter) {
-      if (!statuses.some((s) => s.id === f)) fail(`${f} is not tracked`);
-      if (!committable.some((s) => s.id === f)) {
-        const st = statuses.find((s) => s.id === f)!;
-        console.log(`${f}: nothing to commit (${st.state})`);
+      const st = statuses.find((s) => s.id === f);
+      if (!st) fail(`${f} is not tracked`);
+      // One proposal per ticket: there is a single working file, so two proposals
+      // staging it would each be reviewing a change the other can rewrite. The one
+      // thing that may move is an intent nobody has committed yet.
+      if (heldElsewhere(st) && !STAGED_INTENT_STATES.includes(st.state)) {
+        fail(
+          `${f} is already staged in proposal '${st.proposal}' — a ticket belongs to one ` +
+            `proposal at a time. Push that one first, or release it with: ` +
+            `jt uncommit ${f}${explicitProposalFlag(st.proposal!)}`,
+        );
       }
+      if (!committable.some((s) => s.id === f)) console.log(`${f}: nothing to commit (${st.state})`);
+    }
+  }
+
+  let targets;
+  if (filter.length) {
+    targets = committable.filter((s) => filter.includes(s.id));
+  } else if (mine === DEFAULT_PROPOSAL) {
+    targets = committable.filter((s) => !heldElsewhere(s));
+  } else {
+    // A named proposal exists because other agents share this working tree: "every
+    // modified ticket" would sweep their half-finished edits into this review. With
+    // no ids, commit only new edits to what this proposal already holds.
+    targets = committable.filter((s) => s.proposal === mine);
+    if (targets.length === 0) {
+      fail(
+        `nothing to commit in proposal '${mine}' — name the tickets it should take: ` +
+          `jt commit${flag} <KEY|@name...>`,
+      );
     }
   }
   if (targets.length === 0) {
@@ -58,6 +85,7 @@ export function cmdCommit(argv: string[]): void {
   const snapshots: Record<string, ChainSnapshot> = {};
   for (const s of targets) {
     if (STAGED_INTENT_STATES.includes(s.state)) {
+      if (heldElsewhere(s)) adoptIntent(store, s.id, s.proposal!);
       const intents = store.readIntents();
       const intent = intents.find((x) => x.key === s.id);
       if (intent) {
@@ -78,7 +106,17 @@ export function cmdCommit(argv: string[]): void {
 
   appendChainEntry(store, "agent", note || `commit ${committed.join(", ")}`, snapshots);
   console.log(`${green("committed:")} ${committed.map(bold).join(", ")}`);
-  console.log(dim("review what push will send: jt diff --committed · then: jt push"));
+  console.log(dim(`review what push will send: jt diff --committed${flag} · then: jt push${flag}`));
+}
+
+/** Move a staged-but-uncommitted intent from the proposal it was staged in to this one. */
+function adoptIntent(store: Store, key: string, from: string): void {
+  const source = store.scoped(from);
+  const intent = source.readIntents().find((i) => i.key === key);
+  if (!intent) return;
+  source.writeIntents(source.readIntents().filter((i) => i.key !== key));
+  source.dropIfDrained();
+  store.writeIntents([...store.readIntents().filter((i) => i.key !== key), intent]);
 }
 
 function validateForCommit(store: Store, meta: Meta, id: string, t: Ticket): void {

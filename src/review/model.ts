@@ -1,4 +1,5 @@
 /** Builds the review-page model from the tool-owned layers (no network). */
+import { type AutoVerdict, NO_AUTO } from "../autoallow.ts";
 import {
   type ChainSnapshot,
   readChain,
@@ -8,6 +9,7 @@ import {
 } from "../chain.ts";
 import { intentNoun } from "../intents.ts";
 import { compareTicketIds } from "../keys.ts";
+import { DEFAULT_PROPOSAL } from "../proposal.ts";
 import { NO_REFS, type RefContext } from "../refs.ts";
 import type { Store } from "../store.ts";
 import type { Config, Ticket } from "../types.ts";
@@ -24,10 +26,12 @@ export function buildPageModel(
   config: Config,
   plans: TicketPlan[],
   refs: RefContext = NO_REFS,
+  verdict: AutoVerdict = NO_AUTO,
 ): ReviewPageModel {
   const chain = readChain(store);
   const marker = readReviewMarker(store);
-  const tickets = plans.map((p) => {
+  const cards = plans.map((p) => {
+    const auto = verdict.tickets[p.id];
     const base = p.id.startsWith("@") ? null : store.readBase(p.id);
     const committed = store.readCommitted(p.id);
     const from = base?.ticket ?? null;
@@ -46,11 +50,15 @@ export function buildPageModel(
       summary: p.summary,
       kind: p.kind,
       unchangedSinceReview,
+      // A wholly auto-allowed ticket is greyed out as a card; within a mixed one only
+      // the auto-allowed rows are.
+      autoAllowed: Boolean(auto?.all),
       diffHtml: renderTicketDelta(
         from,
         to,
         refs,
         intentMode ? { mode: intentMode, summary: p.summary } : undefined,
+        auto && !auto.all ? new Set(auto.auto) : undefined,
       ),
       opsJson: JSON.stringify(
         p.ops.map((o) => ({ method: o.method, path: o.path, body: o.body })),
@@ -60,9 +68,13 @@ export function buildPageModel(
     };
   });
 
+  // What needs the reviewer's eyes first; what their own settings already allow, last.
+  const tickets = [...cards.filter((t) => !t.autoAllowed), ...cards.filter((t) => t.autoAllowed)];
+  const named = store.proposal === DEFAULT_PROPOSAL ? "" : `proposal ${store.proposal} — `;
+
   return {
     mode: "review",
-    title: `jt push review — ${tickets.length} ticket${tickets.length === 1 ? "" : "s"}`,
+    title: `jt push review — ${named}${tickets.length} ticket${tickets.length === 1 ? "" : "s"}`,
     target: { baseUrl: config.baseUrl, project: config.project },
     tickets,
     commits: buildCommitViews(store, refs),

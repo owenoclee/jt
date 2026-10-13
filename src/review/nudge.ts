@@ -11,6 +11,7 @@
  * owed in its own output, at the moment it creates the obligation. Advisory text only:
  * nothing here changes exit codes or control flow.
  */
+import { DEFAULT_PROPOSAL, proposalFlag } from "../proposal.ts";
 import { bold, dim, yellow } from "../render/colors.ts";
 
 /**
@@ -31,15 +32,16 @@ export function openerCommand(url: string): string {
 }
 
 /** Printed by jt push directly under the URL: what is still owed, in order. */
-export function pushHandoffNotice(url: string): string {
+export function pushHandoffNotice(url: string, proposal: string = DEFAULT_PROPOSAL): string {
+  const flag = proposalFlag(proposal);
   return [
     yellow(bold("NOT DONE — nothing has been sent to Jira yet. Two steps remain:")),
     `  1. open the review page for the user:  ${bold(openerCommand(url))}`,
-    `  2. collect their decision:             ${bold("jt await")}`,
+    `  2. collect their decision:             ${bold(`jt await${flag}`)}`,
     dim("     blocks until they decide, then reports the outcome exactly once — exit"),
     dim("     0 pushed · 2 changes requested · 1 stale/failed/cancelled. Run it as a"),
     dim("     background task if your harness supports one."),
     yellow("Do not report this push as finished, and do not move on to other work,"),
-    yellow("until jt await returns. jt cancel withdraws the review if plans change."),
+    yellow(`until jt await${flag} returns. jt cancel${flag} withdraws the review if plans change.`),
   ].join("\n");
 }

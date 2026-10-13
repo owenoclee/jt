@@ -181,18 +181,22 @@ export async function cmdAwait(argv: string[]): Promise<void> {
   let result = readResult(jiraDir);
   if (!result) {
     const pending = readPending(jiraDir);
-    if (!pending) {
+    // The server writes its outcome BEFORE removing the pending file, so "no outcome,
+    // then no pending review" can also mean the review settled between those two
+    // reads. Look for the outcome once more before concluding there is nothing.
+    if (!pending) result = readResult(jiraDir);
+    if (!pending && !result) {
       fail(
         `nothing to await${inProposal(store)} — no pending review and no uncollected outcome ` +
           `(jt push first)${reviewsElsewhere(store)}`,
       );
     }
-    console.log(dim(`waiting on the review at ${pending.url} ...`));
+    if (pending) console.log(dim(`waiting on the review at ${pending.url} ...`));
     // Bounds this wait, never the review: giving up collects nothing and the page
     // stays live — rerun jt await to keep waiting.
     const timeoutMs = args.timeout ? Number(args.timeout) * 1000 : 600_000;
     const deadline = Date.now() + timeoutMs;
-    while (!result && Date.now() < deadline) {
+    while (pending && !result && Date.now() < deadline) {
       await sleep(250);
       result = readResult(jiraDir);
       if (!result && !pidAlive(pending.pid)) {

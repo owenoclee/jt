@@ -1,4 +1,4 @@
-/** Local-only verbs: status, diff, show, new, rm, archive, unarchive, untrack, resolve, log, schema. */
+/** Local-only verbs: status, diff, show, new, rm, archive, unarchive, untrack, resolve, schema. */
 import { parseArgs } from "@std/cli";
 import { basename, join } from "@std/path";
 import { ticketsEqual } from "../canonical.ts";
@@ -9,18 +9,20 @@ import { localContext, withClient, withMeta } from "../context.ts";
 import { diffTickets } from "../diff.ts";
 import { fail } from "../errors.ts";
 import { COMMITTED_INTENT_STATES, intentNoun, STAGED_INTENT_STATES } from "../intents.ts";
+import { DEFAULT_PROPOSAL, explicitProposalFlag, proposalFlag } from "../proposal.ts";
 import { makeRefContext } from "../refs.ts";
 import { bold, cyan, dim, green, red, yellow } from "../render/colors.ts";
 import { upstreamChangeCount } from "./changes.ts";
-import { renderDiffEntries, renderJournalEntry, renderStatus, renderTicket } from "../render/render.ts";
+import { renderDiffEntries, renderStatus, renderTicket } from "../render/render.ts";
 import { ticketJsonSchema } from "../schema.ts";
 import { fetchBaseEntry } from "../sync.ts";
+import type { Store } from "../store.ts";
 import type { IntentMode, Ticket } from "../types.ts";
 
 export function cmdStatus(argv: string[] = []): void {
   const args = parseArgs(argv, { boolean: ["all"] });
   const { store } = localContext();
-  console.log(renderStatus(store.status(), { all: Boolean(args.all) }));
+  console.log(renderStatus(store.status(), { all: Boolean(args.all), proposal: store.proposal }));
   const upstream = upstreamChangeCount(store);
   if (upstream > 0) {
     console.log(yellow(`  ↓ ${upstream} upstream change${upstream === 1 ? "" : "s"} since your last ack — jt changes`));
@@ -71,7 +73,7 @@ export function cmdDiff(argv: string[]): void {
       if (s.state === "new+committed+modified" || s.state === "committed+modified" || s.state === "modified") {
         const against = args.all
           ? store.readBase(s.id)?.ticket
-          : (store.readCommitted(s.id)?.ticket ?? store.readBase(s.id)?.ticket);
+          : (staged(store, s).readCommitted(s.id)?.ticket ?? store.readBase(s.id)?.ticket);
         if (!against || !working) continue;
         const entries = diffTickets(against, working.ticket);
         if (entries.length) {
@@ -80,7 +82,7 @@ export function cmdDiff(argv: string[]): void {
         continue;
       }
       if (STAGED_INTENT_STATES.includes(s.state)) {
-        const intent = store.readIntents().find((i) => i.key === s.id)!;
+        const intent = staged(store, s).readIntents().find((i) => i.key === s.id)!;
         sections.push(`${intentHeading(intent.mode, true)} ${bold(s.id)}  "${s.summary}"`);
         continue;
       }
@@ -158,10 +160,12 @@ function diffWeb(
       else if (
         STAGED_INTENT_STATES.includes(s.state) || COMMITTED_INTENT_STATES.includes(s.state)
       ) {
-        const intent = store.readIntents().find((i) => i.key === s.id)!;
+        const intent = staged(store, s).readIntents().find((i) => i.key === s.id)!;
         push(s.id, s.summary, intent.mode, base?.ticket ?? null, null);
       } else if (working && base) {
-        const against = all ? base.ticket : store.readCommitted(s.id)?.ticket ?? base.ticket;
+        const against = all
+          ? base.ticket
+          : staged(store, s).readCommitted(s.id)?.ticket ?? base.ticket;
         push(s.id, working.ticket.summary, "update", against, working.ticket);
       } else if (working && !base && all) {
         push(s.id, s.summary, "create", null, working.ticket);
@@ -183,6 +187,11 @@ function diffWeb(
   const path = join(dir, `diff-${Date.now()}.html`);
   Deno.writeTextFileSync(path, renderPage(model));
   console.log(`diff page: ${path}`);
+}
+
+/** The store scoped to whichever proposal a status row says holds the ticket. */
+function staged(store: Store, s: { proposal?: string }): Store {
+  return store.scoped(s.proposal ?? store.proposal);
 }
 
 export function cmdShow(argv: string[]): void {
@@ -211,7 +220,7 @@ export function cmdShow(argv: string[]): void {
     ticket = store.readBase(id)?.ticket;
     label = "base — remote as of last fetch";
   } else if (args.committed) {
-    ticket = store.readCommitted(id)?.ticket;
+    ticket = store.holder(id).readCommitted(id)?.ticket;
     label = "committed — approved for push";
   } else {
     ticket = store.readWorking(id)?.ticket;
@@ -241,7 +250,7 @@ function showWeb(
     const ticket = base
       ? store.readBase(id)?.ticket
       : committed
-      ? store.readCommitted(id)?.ticket
+      ? store.holder(id).readCommitted(id)?.ticket
       : store.readWorking(id)?.ticket;
     if (!ticket) continue;
     const state = statuses.find((s) => s.id === id)?.state ?? "clean";
@@ -301,7 +310,14 @@ export function cmdNew(argv: string[]): void {
   ctx.store.writeWorking(`@${name}`, ticket);
   const path = ctx.store.workingPath(`@${name}`);
   console.log(`created ${path} ${dim(`(referenced as @${name} until pushed)`)}`);
-  console.log(dim("edit the file, then: jt diff && jt commit && jt push"));
+  const flag = proposalFlag(ctx.store.proposal);
+  console.log(
+    dim(
+      flag
+        ? `edit the file, then: jt diff && jt commit${flag} @${name} && jt push${flag}`
+        : "edit the file, then: jt diff && jt commit && jt push",
+    ),
+  );
 }
 
 /** jt uncommit: `git restore --staged` — keep working edits, remove from the changeset. */
@@ -326,7 +342,14 @@ export function cmdUncommit(argv: string[]): void {
     }
     const committed = store.readCommitted(id);
     if (!committed) {
-      console.log(`${id}: nothing committed`);
+      // Uncommitting is scoped: it only ever shrinks the proposal it was asked about.
+      const other = store.heldBy(id);
+      console.log(
+        other && other !== store.proposal
+          ? `${id}: not in ${proposalLabel(store.proposal)} — it is staged in proposal ` +
+            `'${other}' (jt uncommit ${id}${explicitProposalFlag(other)})`
+          : `${id}: nothing committed`,
+      );
       continue;
     }
     store.removeCommitted(id);
@@ -334,6 +357,28 @@ export function cmdUncommit(argv: string[]): void {
     console.log(`uncommitted ${bold(id)} ${dim("(working edits kept — see jt status)")}`);
   }
   withdrawFromChain(store, "agent", `uncommit ${Object.keys(withdrawn).join(", ")}`, withdrawn);
+  store.dropIfDrained();
+}
+
+/**
+ * Commands that rewrite staged state act only on the proposal they were run for. A
+ * ticket staged elsewhere is another agent's work in progress: say where it lives
+ * rather than reaching across.
+ */
+function requireOwn(store: Store, id: string, command: string): void {
+  const holder = store.heldBy(id);
+  if (holder && holder !== store.proposal) {
+    fail(
+      `${id} is staged in proposal '${holder}', not ${proposalLabel(store.proposal)} — a ticket ` +
+        `belongs to one proposal at a time. To act on it there: jt ${command} ${id}${
+          explicitProposalFlag(holder)
+        }`,
+    );
+  }
+}
+
+function proposalLabel(name: string): string {
+  return name === DEFAULT_PROPOSAL ? "the default proposal" : `proposal '${name}'`;
 }
 
 /** jt restore: `git checkout -- <file>` — reset working file to committed-if-staged else base. */
@@ -344,6 +389,7 @@ export function cmdRestore(argv: string[]): void {
   const { store } = localContext();
   for (const raw of argv) {
     const id = raw.startsWith("@") ? raw : raw.toUpperCase();
+    requireOwn(store, id, "restore");
     const intents = store.readIntents();
     const intent = intents.find((i) => i.key === id);
     if (intent) {
@@ -360,6 +406,7 @@ export function cmdRestore(argv: string[]): void {
       // An unarchive can be staged for a key that was never in the mirror; there is
       // then no base to put back, and dropping the intent is the whole restore.
       if (base) store.writeWorking(id, base.ticket);
+      store.dropIfDrained();
       console.log(
         `restored ${bold(id)} ${
           dim(base ? `(${noun} undone; working file back from base)` : `(${noun} undone)`)
@@ -418,6 +465,7 @@ function stageIntent(mode: IntentMode, argv: string[]): void {
   if (!base && mode !== "unarchive") {
     fail(`${key} is not tracked (no base snapshot) — jt fetch ${key} first`);
   }
+  requireOwn(store, key, mode === "delete" ? "rm" : mode);
   const summary = base?.ticket.summary ?? "";
   const intents = store.readIntents().filter((i) => i.key !== key);
   intents.push({ key, mode, summary, requestedAt: new Date().toISOString(), committed: false });
@@ -438,7 +486,10 @@ function stageIntent(mode: IntentMode, argv: string[]): void {
   if (mode === "archive") {
     console.log(dim("  archiving needs a Jira Premium or Enterprise plan"));
   }
-  console.log(dim(`jt commit && jt push to ${mode} in Jira · jt restore ${key} to abandon`));
+  const flag = proposalFlag(store.proposal);
+  console.log(
+    dim(`jt commit${flag} && jt push${flag} to ${mode} in Jira · jt restore ${key} to abandon`),
+  );
 }
 
 /** "will delete:" / "will archive:" — the heading a staged intent gets in jt diff. */
@@ -452,6 +503,7 @@ export function cmdUntrack(argv: string[]): void {
   const { store } = localContext();
   for (const raw of argv) {
     const id = raw.startsWith("@") ? raw : raw.toUpperCase();
+    requireOwn(store, id, "untrack");
     // Untracking something that was staged for push shrinks the changeset — record a
     // withdrawal tombstone; plain cleanup of unstaged tickets just prunes.
     const committed = store.readCommitted(id);
@@ -471,6 +523,7 @@ export function cmdUntrack(argv: string[]): void {
     } else {
       pruneChain(store, [id]);
     }
+    store.dropIfDrained();
     console.log(`untracked ${id} ${dim("(local only — Jira is untouched)")}`);
   }
 }
@@ -483,6 +536,7 @@ export async function cmdResolve(argv: string[]): Promise<void> {
     );
   }
   const ctx = withClient(withMeta(localContext()));
+  requireOwn(ctx.store, key, "resolve");
   const conflict = ctx.store.readConflicts().find((c) => c.key === key);
   if (!conflict) fail(`no recorded conflict for ${key}`);
   const working = ctx.store.readWorking(key);
@@ -493,6 +547,7 @@ export async function cmdResolve(argv: string[]): Promise<void> {
   ctx.store.removeCommitted(key);
   pruneChain(ctx.store, [key]);
   ctx.store.writeConflicts(ctx.store.readConflicts().filter((c) => c.key !== key));
+  ctx.store.dropIfDrained();
   if (ticketsEqual(working.ticket, fresh.ticket)) {
     ctx.store.writeWorking(key, fresh.ticket);
     console.log(`${green("resolved")} ${key} — working file matches remote; nothing to commit`);
@@ -501,25 +556,6 @@ export async function cmdResolve(argv: string[]): Promise<void> {
       `${green("resolved")} ${key} — base advanced to latest remote; ` +
         `your working file is the desired state. Review: jt diff ${key}, then jt commit`,
     );
-  }
-}
-
-export function cmdLog(argv: string[]): void {
-  const args = parseArgs(argv, { boolean: ["all", "full"] });
-  const { store } = localContext();
-  const entries = store.listJournal();
-  if (entries.length === 0) {
-    console.log("no pushes yet");
-    return;
-  }
-  const shown = args.all ? entries : entries.slice(0, 10);
-  console.log(
-    shown.map((e) => renderJournalEntry(e.path, e.entry, { full: Boolean(args.full) })).join(
-      "\n\n",
-    ),
-  );
-  if (!args.all && entries.length > shown.length) {
-    console.log(dim(`\n(${entries.length - shown.length} older — jt log --all)`));
   }
 }
 

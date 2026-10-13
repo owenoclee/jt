@@ -19,7 +19,47 @@ Deno.test("Homebrew formula selects checksummed macOS archives by architecture",
   assertStringIncludes(formula, "depends_on :macos");
   assertStringIncludes(formula, 'bin.install "jt"');
   assertStringIncludes(formula, 'shell_output("#{bin}/jt --version")');
+  assertStringIncludes(formula, "class Jt < Formula");
+  assertStringIncludes(formula, 'conflicts_with "owenoclee/tap/jt-rc"');
+  assertEquals(formula.includes("\n  version "), false, "stable versions are read from the URL");
   assertEquals(formula.endsWith("\n"), true);
+});
+
+Deno.test("release candidates get their own opt-in formula, never the stable one", () => {
+  const rc = renderHomebrewFormula({
+    version: "1.3.0-rc.2",
+    arm64Sha256: ARM_SHA,
+    x86_64Sha256: INTEL_SHA,
+    channel: "rc",
+  });
+  assertStringIncludes(rc, "class JtRc < Formula");
+  assertStringIncludes(rc, "releases/download/v1.3.0-rc.2/jt-aarch64-apple-darwin.tar.gz");
+  // Homebrew would read "1.3.0" out of that URL; the candidate must say what it is.
+  assertStringIncludes(rc, 'version "1.3.0-rc.2"');
+  assertStringIncludes(rc, 'conflicts_with "owenoclee/tap/jt"');
+  assertStringIncludes(rc, 'bin.install "jt"');
+
+  // The rc channel also carries stable releases, so testers are moved forward.
+  assertStringIncludes(
+    renderHomebrewFormula({
+      version: "1.3.0",
+      arm64Sha256: ARM_SHA,
+      x86_64Sha256: INTEL_SHA,
+      channel: "rc",
+    }),
+    'version "1.3.0"',
+  );
+
+  assertThrows(
+    () =>
+      renderHomebrewFormula({
+        version: "1.3.0-rc.2",
+        arm64Sha256: ARM_SHA,
+        x86_64Sha256: INTEL_SHA,
+      }),
+    Error,
+    "refusing to write the stable formula",
+  );
 });
 
 Deno.test("Homebrew formula rejects unsafe release metadata", () => {

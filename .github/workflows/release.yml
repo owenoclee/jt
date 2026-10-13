@@ -18,13 +18,26 @@ jobs:
         with:
           deno-version: v2.x
       - name: Validate tag and source version
+        id: version
         run: |
           tag_version="${GITHUB_REF_NAME#v}"
-          source_version="$(deno eval 'import { VERSION } from "./src/main.ts"; console.log(VERSION)')"
+          source_version="$(deno eval 'import { VERSION } from "./src/version.ts"; console.log(VERSION)')"
           if [[ "$tag_version" != "$source_version" ]]; then
             echo "tag version $tag_version does not match source version $source_version" >&2
             exit 1
           fi
+          # Two shapes only: X.Y.Z is a stable release, X.Y.Z-rc.N a release candidate.
+          # The channel decides who receives the build, so anything else is refused
+          # rather than guessed at.
+          if [[ "$tag_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$tag_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "version $tag_version is neither X.Y.Z nor X.Y.Z-rc.N" >&2
+            exit 1
+          fi
+          echo "version=$tag_version" >> "$GITHUB_OUTPUT"
       - name: Tests
         run: deno task test
       - name: Compile multi-arch binaries
@@ -70,31 +83,52 @@ jobs:
         with:
           files: dist/release/*
           generate_release_notes: true
+          # A candidate is published as a GitHub pre-release: it never becomes
+          # "latest", so the README's download link and stable builds' update
+          # check keep pointing at the last stable version.
+          prerelease: ${{ steps.version.outputs.prerelease }}
+          make_latest: ${{ steps.version.outputs.prerelease == 'false' }}
       - name: Check out Homebrew tap
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: owenoclee/homebrew-tap
           ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
           path: homebrew-tap
-      - name: Update Homebrew formula
+      - name: Update Homebrew formulae
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
         run: |
           arm64_sha="$(awk '$2 == "jt-aarch64-apple-darwin.tar.gz" { print $1 }' dist/release/SHA256SUMS)"
           x86_64_sha="$(awk '$2 == "jt-x86_64-apple-darwin.tar.gz" { print $1 }' dist/release/SHA256SUMS)"
-          deno run --allow-write=homebrew-tap/Formula scripts/generate_homebrew_formula.ts \
-            --version "${GITHUB_REF_NAME#v}" \
-            --arm64-sha256 "$arm64_sha" \
-            --x86-64-sha256 "$x86_64_sha" \
-            --output homebrew-tap/Formula/jt.rb
-          ruby -c homebrew-tap/Formula/jt.rb
-      - name: Publish Homebrew formula
+          formula() {
+            deno run --allow-write=homebrew-tap/Formula scripts/generate_homebrew_formula.ts \
+              --version "$VERSION" \
+              --arm64-sha256 "$arm64_sha" \
+              --x86-64-sha256 "$x86_64_sha" \
+              --channel "$1" \
+              --output "homebrew-tap/Formula/$2"
+            ruby -c "homebrew-tap/Formula/$2"
+          }
+          # jt-rc is the opt-in channel: it carries every release, candidates included,
+          # so someone who installed it is never left behind on an old candidate.
+          formula rc jt-rc.rb
+          # jt is what everyone else has. A candidate must never reach it — the
+          # generator refuses as well, should this condition ever be edited away.
+          if [[ "$PRERELEASE" == "false" ]]; then
+            formula stable jt.rb
+          fi
+      - name: Publish Homebrew formulae
         working-directory: homebrew-tap
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if git diff --quiet -- Formula/jt.rb; then
-            echo "Formula/jt.rb is already current"
+          git add Formula
+          if git diff --cached --quiet; then
+            echo "formulae are already current"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/jt.rb
-          git commit -m "jt ${GITHUB_REF_NAME#v}"
+          git commit -m "jt $VERSION"
           git push

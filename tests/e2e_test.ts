@@ -3,6 +3,7 @@
  * command functions: init → meta sync → fetch → edit → commit → push → create
  * flow with @refs → links/comments/transitions → staleness → tamper → delete.
  */
+import "./hermetic.ts";
 import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { cmdCommit } from "../src/commands/commit.ts";

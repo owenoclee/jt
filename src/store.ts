@@ -10,13 +10,21 @@
  *   .jira/journal/            push audit log
  *   .jira/seen/<KEY>.json     remote state as last known to the user (ack / approved pushes)
  *   .jira/sync.json           mirror watermark + scope membership (tool-owned)
+ *
+ * The committed layer and the intents file are per PROPOSAL (see proposal.ts). The
+ * default proposal keeps them at the paths above; a named one keeps its own copies
+ * under .jira/proposals/<name>/, beside its commit chain and review handoff files.
+ * Everything else — working tree, base, seen, conflicts, journal — is shared: there is
+ * one Jira, and one file per ticket. A ticket is therefore held by at most one proposal
+ * at a time, and a Store is always scoped to one.
  */
-import { basename, join } from "@std/path";
+import { basename, dirname, join } from "@std/path";
 import { serializeTicket, ticketsEqual } from "./canonical.ts";
 import { fail } from "./errors.ts";
 import { compareTicketIds } from "./keys.ts";
 import { parseTicket } from "./schema.ts";
 import { intentState } from "./intents.ts";
+import { DEFAULT_PROPOSAL } from "./proposal.ts";
 import type {
   BaseEntry,
   ConflictRecord,
@@ -37,6 +45,10 @@ export interface WorkingFile {
 
 export class Store {
   readonly jiraDir: string;
+  /** Where every named proposal keeps its directory. */
+  readonly proposalsDir: string;
+  /** This proposal's own directory — .jira itself for the default proposal. */
+  readonly proposalDir: string;
   readonly baseDir: string;
   readonly committedDir: string;
   readonly journalDir: string;
@@ -48,15 +60,19 @@ export class Store {
   readonly conflictsFile: string;
   readonly syncFile: string;
 
-  constructor(public root: string) {
+  constructor(public root: string, readonly proposal: string = DEFAULT_PROPOSAL) {
     this.jiraDir = join(root, ".jira");
+    this.proposalsDir = join(this.jiraDir, "proposals");
+    this.proposalDir = proposal === DEFAULT_PROPOSAL
+      ? this.jiraDir
+      : join(this.proposalsDir, proposal);
     this.baseDir = join(this.jiraDir, "base");
-    this.committedDir = join(this.jiraDir, "committed");
+    this.committedDir = join(this.proposalDir, "committed");
     this.journalDir = join(this.jiraDir, "journal");
     this.ticketsDir = join(root, "tickets");
     this.seenDir = join(this.jiraDir, "seen");
-    this.intentsFile = join(this.jiraDir, "intents.json");
-    this.legacyDeletionsFile = join(this.jiraDir, "deletions.json");
+    this.intentsFile = join(this.proposalDir, "intents.json");
+    this.legacyDeletionsFile = join(this.proposalDir, "deletions.json");
     this.conflictsFile = join(this.jiraDir, "conflicts.json");
     this.syncFile = join(this.jiraDir, "sync.json");
   }
@@ -64,6 +80,84 @@ export class Store {
   ensureDirs(): void {
     for (const d of [this.jiraDir, this.baseDir, this.committedDir, this.journalDir, this.ticketsDir, this.seenDir]) {
       Deno.mkdirSync(d, { recursive: true });
+    }
+  }
+
+  // ---- proposals ----
+
+  /** The same workspace seen through another proposal. */
+  scoped(proposal: string): Store {
+    return proposal === this.proposal ? this : new Store(this.root, proposal);
+  }
+
+  /** Every proposal with a directory on disk, default first. */
+  listProposals(): string[] {
+    let named: string[] = [];
+    try {
+      named = [...Deno.readDirSync(this.proposalsDir)]
+        .filter((e) => e.isDirectory)
+        .map((e) => e.name)
+        .sort();
+    } catch {
+      // no named proposals yet
+    }
+    return [DEFAULT_PROPOSAL, ...named];
+  }
+
+  /**
+   * Which proposal holds each ticket — a committed copy or a staged intent, committed
+   * or not. A ticket is held by at most one; should two ever claim it, this proposal's
+   * own claim wins so its commands keep acting on what they staged.
+   */
+  holders(): Map<string, string> {
+    const out = new Map<string, string>();
+    const names = this.listProposals().filter((n) => n !== this.proposal);
+    for (const name of [...names, this.proposal]) {
+      const s = this.scoped(name);
+      for (const id of s.listCommittedIds()) out.set(id, name);
+      for (const intent of s.readIntents()) out.set(intent.key, name);
+    }
+    return out;
+  }
+
+  /** The proposal holding `id`, or null when nothing has staged it. */
+  heldBy(id: string): string | null {
+    const order = [this.proposal, ...this.listProposals().filter((n) => n !== this.proposal)];
+    for (const name of order) {
+      const s = this.scoped(name);
+      if (s.committedExists(id) || s.readIntents().some((i) => i.key === id)) return name;
+    }
+    return null;
+  }
+
+  /** This workspace scoped to whichever proposal holds `id` — itself when none does. */
+  holder(id: string): Store {
+    return this.scoped(this.heldBy(id) ?? this.proposal);
+  }
+
+  /** True once nothing is staged here and no review is pending or uncollected. */
+  isDrained(): boolean {
+    if (this.listCommittedIds().length > 0 || this.readIntents().length > 0) return false;
+    return !["chain.json", "push-spec.json", "pending-push.json", "push-result.json"].some((f) => {
+      try {
+        Deno.statSync(join(this.proposalDir, f));
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  /**
+   * Remove a named proposal's directory once it has drained, so finished proposals do
+   * not accumulate. The default proposal lives in .jira itself and is never removed.
+   */
+  dropIfDrained(): void {
+    if (this.proposal === DEFAULT_PROPOSAL || !this.isDrained()) return;
+    try {
+      Deno.removeSync(this.proposalDir, { recursive: true });
+    } catch {
+      // already gone
     }
   }
 
@@ -187,6 +281,15 @@ export class Store {
 
   committedPath(id: string): string {
     return join(this.committedDir, `${idToStem(id)}.json`);
+  }
+
+  committedExists(id: string): boolean {
+    try {
+      Deno.statSync(this.committedPath(id));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   readCommitted(id: string): WorkingFile | null {
@@ -326,6 +429,7 @@ export class Store {
       }
       return;
     }
+    Deno.mkdirSync(dirname(this.intentsFile), { recursive: true });
     Deno.writeTextFileSync(this.intentsFile, JSON.stringify(intents, null, 2) + "\n");
   }
 
@@ -354,7 +458,10 @@ export class Store {
   appendJournal(entry: JournalEntry): string {
     Deno.mkdirSync(this.journalDir, { recursive: true });
     const stamp = entry.startedAt.replace(/[:.]/g, "-");
-    const path = join(this.journalDir, `${stamp}-push.json`);
+    // Proposals push independently, possibly in the same millisecond: the name keeps
+    // their journal files apart. The default proposal keeps the historical filename.
+    const suffix = this.proposal === DEFAULT_PROPOSAL ? "" : `-${this.proposal}`;
+    const path = join(this.journalDir, `${stamp}-push${suffix}.json`);
     Deno.writeTextFileSync(path, JSON.stringify(entry, null, 2) + "\n");
     return path;
   }
@@ -377,29 +484,41 @@ export class Store {
 
   status(): TicketStatus[] {
     const working = new Map(this.listWorking().map((w) => [w.id, w]));
-    const committedIds = new Set(this.listCommittedIds());
     const baseKeys = new Set(this.listBaseKeys());
-    const intents = new Map(this.readIntents().map((i) => [i.key, i]));
     const conflicts = new Map(this.readConflicts().map((c) => [c.key, c]));
 
-    const ids = new Set<string>([
-      ...working.keys(),
-      ...committedIds,
-      ...baseKeys,
-      ...intents.keys(),
-    ]);
+    // Committed copies and intents live per proposal; a ticket's state is read from
+    // whichever proposal holds it, and names that proposal so callers can tell their
+    // own staged work from another agent's.
+    const held = new Map<string, { store: Store; intent?: IssueIntent }>();
+    const names = this.listProposals().filter((n) => n !== this.proposal);
+    for (const name of [...names, this.proposal]) {
+      const s = this.scoped(name);
+      for (const id of s.listCommittedIds()) held.set(id, { store: s });
+      for (const intent of s.readIntents()) held.set(intent.key, { store: s, intent });
+    }
+
+    const ids = new Set<string>([...working.keys(), ...baseKeys, ...held.keys()]);
 
     const out: TicketStatus[] = [];
     for (const id of [...ids].sort(compareTicketIds)) {
+      const h = held.get(id);
+      const proposal = h ? { proposal: h.store.proposal } : {};
       const w = working.get(id) ?? null;
-      const c = committedIds.has(id) ? this.readCommitted(id) : null;
+      const c = h && !h.intent ? h.store.readCommitted(id) : null;
       const base = id.startsWith("@") ? null : this.readBase(id);
-      const intent = intents.get(id);
+      const intent = h?.intent;
       const summary = w?.ticket.summary ?? c?.ticket.summary ?? base?.ticket.summary ?? "";
 
       if (conflicts.has(id)) {
         const cf = conflicts.get(id)!;
-        out.push({ id, state: "conflict", summary, detail: `fields: ${cf.fields.join(", ")}` });
+        out.push({
+          id,
+          state: "conflict",
+          summary,
+          detail: `fields: ${cf.fields.join(", ")}`,
+          ...proposal,
+        });
         continue;
       }
       if (intent) {
@@ -407,6 +526,7 @@ export class Store {
           id,
           state: intentState(intent.mode, intent.committed),
           summary: intent.summary,
+          ...proposal,
         });
         continue;
       }
@@ -417,6 +537,7 @@ export class Store {
           summary,
           detail:
             "working file was deleted by hand — run `jt archive`/`jt rm` (changes Jira) or `jt untrack`",
+          ...proposal,
         });
         continue;
       }
@@ -429,6 +550,7 @@ export class Store {
             id,
             state: ticketsEqual(w.ticket, c.ticket) ? "new+committed" : "new+committed+modified",
             summary,
+            ...proposal,
           });
         } else {
           out.push({ id, state: "new", summary });
@@ -441,6 +563,7 @@ export class Store {
           id,
           state: ticketsEqual(w.ticket, c.ticket) ? "committed" : "committed+modified",
           summary,
+          ...proposal,
         });
       } else {
         out.push({

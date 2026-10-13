@@ -41,11 +41,14 @@ interface PullCounts {
  * synthetic "remote" entry (or prune, when the rebase drained the ticket entirely).
  */
 function integrateWithChain(
-  store: Store,
+  anyStore: Store,
   entry: Parameters<typeof integrateFetched>[1],
-  rebases: { key: string; fields: string[]; snapshot: ChainSnapshot }[],
+  rebases: Rebase[],
 ): ReturnType<typeof integrateFetched> {
   const key = entry.key;
+  // A pull serves every proposal: the rebase lands in the chain of whichever one
+  // holds the ticket.
+  const store = anyStore.holder(key);
   const before = store.readCommitted(key)?.bytes ?? null;
   const result = integrateFetched(store, entry);
   const after = store.readCommitted(key);
@@ -57,6 +60,7 @@ function integrateWithChain(
     });
   } else if (after && after.bytes !== before && result.kind === "rebased") {
     rebases.push({
+      store,
       key,
       fields: result.fields,
       snapshot: { kind: "ticket", ticket: after.ticket },
@@ -65,20 +69,28 @@ function integrateWithChain(
   return result;
 }
 
-function recordRebases(
-  store: Store,
-  rebases: { key: string; fields: string[]; snapshot: ChainSnapshot }[],
-): void {
-  if (rebases.length === 0) return;
-  const note = `rebase: remote changed ${
-    rebases.map((r) => `${r.fields.join("/")} (${r.key})`).join(", ")
-  }`;
-  appendChainEntry(
-    store,
-    "remote",
-    note,
-    Object.fromEntries(rebases.map((r) => [r.key, r.snapshot])),
-  );
+interface Rebase {
+  /** Scoped to the proposal whose committed copy was rewritten. */
+  store: Store;
+  key: string;
+  fields: string[];
+  snapshot: ChainSnapshot;
+}
+
+/** One synthetic "remote" chain entry per proposal that had committed copies rebased. */
+function recordRebases(rebases: Rebase[]): void {
+  for (const proposal of new Set(rebases.map((r) => r.store.proposal))) {
+    const own = rebases.filter((r) => r.store.proposal === proposal);
+    const note = `rebase: remote changed ${
+      own.map((r) => `${r.fields.join("/")} (${r.key})`).join(", ")
+    }`;
+    appendChainEntry(
+      own[0].store,
+      "remote",
+      note,
+      Object.fromEntries(own.map((r) => [r.key, r.snapshot])),
+    );
+  }
 }
 
 export async function cmdFetch(argv: string[]): Promise<void> {
@@ -92,12 +104,12 @@ export async function cmdFetch(argv: string[]): Promise<void> {
   }
   if (keys.length === 0) fail("jt fetch requires issue keys or --jql '...'");
 
-  const rebases: Parameters<typeof recordRebases>[1] = [];
+  const rebases: Rebase[] = [];
   for (const key of [...new Set(keys)]) {
     const entry = await fetchBaseEntry(ctx.client, ctx.meta, ctx.ws.config, key);
     report(key, integrateWithChain(ctx.store, entry, rebases));
   }
-  recordRebases(ctx.store, rebases);
+  recordRebases(rebases);
 }
 
 export async function cmdPull(argv: string[] = []): Promise<void> {
@@ -109,7 +121,7 @@ export async function cmdPull(argv: string[] = []): Promise<void> {
   const firstSync = prevState.watermark === null;
   const prevScope = new Set(prevState.scopeKeys);
 
-  const rebases: Parameters<typeof recordRebases>[1] = [];
+  const rebases: Rebase[] = [];
   const counts: PullCounts = { new: 0, updated: 0, unchanged: 0, conflicts: 0, removed: 0 };
   const integrated = new Set<string>();
   let scope = new Set<string>();
@@ -124,7 +136,10 @@ export async function cmdPull(argv: string[] = []): Promise<void> {
   }
 
   // Everything tracked but outside the scope: ad-hoc keys, deletion intents, departures.
-  const rest = [...new Set([...store.listBaseKeys(), ...store.readIntents().map((i) => i.key)])]
+  const intentKeys = store.listProposals().flatMap((name) =>
+    store.scoped(name).readIntents().map((i) => i.key)
+  );
+  const rest = [...new Set([...store.listBaseKeys(), ...intentKeys])]
     .filter((k) => !scope.has(k) && !integrated.has(k));
   if (!syncJql && rest.length === 0) {
     console.log("nothing tracked — run: jt fetch <KEY...>");
@@ -147,7 +162,7 @@ export async function cmdPull(argv: string[] = []): Promise<void> {
       }
     }
   }
-  recordRebases(store, rebases);
+  recordRebases(rebases);
 
   if (syncJql) {
     if (firstSync) {
@@ -180,7 +195,7 @@ async function pullScope(
   jql: string,
   full: boolean,
   verbose: boolean,
-  rebases: Parameters<typeof recordRebases>[1],
+  rebases: Rebase[],
   counts: PullCounts,
   integrated: Set<string>,
 ): Promise<string[]> {
@@ -258,14 +273,13 @@ function handleLeftScope(
   store: Store,
   key: string,
   entry: Parameters<typeof integrateFetched>[1],
-  rebases: Parameters<typeof recordRebases>[1],
+  rebases: Rebase[],
   counts: PullCounts,
 ): void {
   const base = store.readBase(key);
   const working = store.readWorking(key);
   const clean = base && working && ticketsEqual(working.ticket, base.ticket) &&
-    !store.listCommittedIds().includes(key) &&
-    !store.readIntents().some((i) => i.key === key);
+    store.heldBy(key) === null;
   if (clean) {
     store.removeWorking(key);
     store.removeBase(key);
@@ -279,12 +293,14 @@ function handleLeftScope(
   );
 }
 
-function handleRemoteDeleted(store: Store, key: string): void {
+function handleRemoteDeleted(anyStore: Store, key: string): void {
+  const store = anyStore.holder(key);
   const intent = store.readIntents().find((i) => i.key === key);
   if (intent && intent.mode !== "unarchive") {
     store.writeIntents(store.readIntents().filter((i) => i.key !== key));
     store.removeBase(key);
     store.removeCommitted(key);
+    store.dropIfDrained();
     console.log(`  ${key} ${dim(`already gone remotely — ${intentNoun(intent.mode)} intent cleared`)}`);
     return;
   }

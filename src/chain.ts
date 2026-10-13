@@ -38,12 +38,14 @@ export interface ReviewMarker {
   decidedAt: string;
 }
 
+// Chain and marker belong to the proposal: each one is reviewed on its own page, in
+// its own rounds.
 function chainPath(store: Store): string {
-  return join(store.jiraDir, "chain.json");
+  return join(store.proposalDir, "chain.json");
 }
 
 function markerPath(store: Store): string {
-  return join(store.jiraDir, "review-marker.json");
+  return join(store.proposalDir, "review-marker.json");
 }
 
 export function readChain(store: Store): Chain {
@@ -63,6 +65,7 @@ function writeChain(store: Store, chain: Chain): void {
     }
     return;
   }
+  Deno.mkdirSync(store.proposalDir, { recursive: true });
   Deno.writeTextFileSync(chainPath(store), JSON.stringify(chain, null, 2) + "\n");
 }
 
@@ -173,6 +176,7 @@ export function readReviewMarker(store: Store): ReviewMarker | null {
 
 export function writeReviewMarker(store: Store, seq: number): void {
   const marker: ReviewMarker = { lastReviewedSeq: seq, decidedAt: new Date().toISOString() };
+  Deno.mkdirSync(store.proposalDir, { recursive: true });
   Deno.writeTextFileSync(markerPath(store), JSON.stringify(marker, null, 2) + "\n");
 }
 

@@ -6,6 +6,7 @@
  * the same process, and an approved page is sent whole: what you saw is exactly what
  * ships, as a unit. Decision provenance (latency, user agent) lands in the journal.
  */
+import type { AutoVerdict } from "../autoallow.ts";
 import { readChain, writeReviewMarker } from "../chain.ts";
 import { checkStaleness, executePush, type PushContext } from "../commands/push.ts";
 import type { CompiledPush } from "../compile.ts";
@@ -18,6 +19,8 @@ import { buildTicketPlans } from "./plan.ts";
 
 export interface ReviewOptions {
   port?: number;
+  /** What the user's settings auto-allow in this changeset: greyed out, and journaled. */
+  verdict?: AutoVerdict;
   /** Print the review URL to stdout (default true; the detached server passes false). */
   announce?: boolean;
   /** Called with the review URL once the server is listening. */
@@ -48,7 +51,7 @@ export async function runReviewFlow(
   const { store } = ctx;
   const plans = buildTicketPlans(store, compiled.ops);
   const refs = makeRefContext(store, ctx.ws.config);
-  const model = buildPageModel(store, ctx.ws.config, plans, refs);
+  const model = buildPageModel(store, ctx.ws.config, plans, refs, opts.verdict);
 
   for (const w of compiled.warnings) console.log(`${yellow("warning:")} ${w}`);
   const decision = await serveAndAwait(model, opts);
@@ -82,7 +85,10 @@ export async function runReviewFlow(
   }
 
   console.log("");
-  const result = await executePush(ctx, compiled.ops, decision.provenance);
+  const result = await executePush(ctx, compiled.ops, {
+    review: decision.provenance,
+    verdict: opts.verdict,
+  });
   console.log("");
   const createdNote = result.refMap.size
     ? ` · created: ${[...result.refMap.entries()].map(([r, k]) => `${r} → ${bold(k)}`).join(", ")}`

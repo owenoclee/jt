@@ -9,7 +9,9 @@ import { parseArgs } from "@std/cli";
 import { basename, fromFileUrl } from "@std/path";
 import { localContext, withClient, withMeta } from "../context.ts";
 import { fail } from "../errors.ts";
+import { DEFAULT_PROPOSAL, explicitProposalFlag, proposalFlag } from "../proposal.ts";
 import { dim } from "../render/colors.ts";
+import type { Store } from "../store.ts";
 import {
   clearPending,
   clearResult,
@@ -29,7 +31,13 @@ import {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Spawn `jt _push-serve` detached and return the review URL it reports. */
-export async function spawnReviewServer(root: string, jiraDir: string): Promise<string> {
+export async function spawnReviewServer(root: string, store: Store): Promise<string> {
+  const jiraDir = store.proposalDir;
+  // The child serves ONE proposal's review; it learns which from the same global flag
+  // a human would type.
+  const serve = store.proposal === DEFAULT_PROPOSAL
+    ? ["_push-serve"]
+    : ["_push-serve", "--proposal", store.proposal];
   // Decide by what is executing NOW: under the deno CLI (deno run / deno task / an
   // installed wrapper) spawn `deno run main.ts`; otherwise this process IS the
   // compiled jt binary — Deno.execPath() is jt itself, so spawn it directly. Never
@@ -49,9 +57,9 @@ export async function spawnReviewServer(root: string, jiraDir: string): Promise<
       "--config",
       fromFileUrl(configFile),
       fromFileUrl(mainModule),
-      "_push-serve",
+      ...serve,
     ]
-    : ["_push-serve"];
+    : serve;
   const child = new Deno.Command(Deno.execPath(), {
     args,
     cwd: root,
@@ -86,7 +94,7 @@ export async function spawnReviewServer(root: string, jiraDir: string): Promise<
 /** jt _push-serve — the detached review server. Spawned by jt push; not for humans. */
 export async function cmdPushServe(): Promise<void> {
   const ctx = withClient(withMeta(localContext()));
-  const jiraDir = ctx.ws.jiraDir;
+  const jiraDir = ctx.store.proposalDir;
   const spec = readSpec(jiraDir);
   if (!spec) fail(`no push spec at ${specPath(jiraDir)} — jt _push-serve is spawned by jt push`);
   clearSpec(jiraDir);
@@ -134,6 +142,7 @@ export async function cmdPushServe(): Promise<void> {
       { ops: spec.ops, warnings: spec.warnings, existingKeys: spec.existingKeys },
       {
         announce: false,
+        verdict: spec.verdict,
         onServe: (url) => {
           pending = { pid: Deno.pid, url, startedAt: new Date().toISOString() };
           writePending(jiraDir, pending);
@@ -165,14 +174,18 @@ export function exitCodeFor(result: PushResultFile): number {
 /** jt await — block until the pending review settles, then report it exactly once. */
 export async function cmdAwait(argv: string[]): Promise<void> {
   const args = parseArgs(argv, { string: ["timeout"] });
-  const { ws } = localContext();
-  const jiraDir = ws.jiraDir;
+  const { store } = localContext();
+  const jiraDir = store.proposalDir;
+  const flag = proposalFlag(store.proposal);
 
   let result = readResult(jiraDir);
   if (!result) {
     const pending = readPending(jiraDir);
     if (!pending) {
-      fail("nothing to await — no pending review and no uncollected outcome (jt push first)");
+      fail(
+        `nothing to await${inProposal(store)} — no pending review and no uncollected outcome ` +
+          `(jt push first)${reviewsElsewhere(store)}`,
+      );
     }
     console.log(dim(`waiting on the review at ${pending.url} ...`));
     // Bounds this wait, never the review: giving up collects nothing and the page
@@ -196,12 +209,13 @@ export async function cmdAwait(argv: string[]): Promise<void> {
     }
     if (!result) {
       fail(
-        "gave up waiting — the review page is still live; run jt await again " +
-          "(or jt cancel to withdraw the review)",
+        `gave up waiting — the review page is still live; run jt await${flag} again ` +
+          `(or jt cancel${flag} to withdraw the review)`,
       );
     }
   }
   clearResult(jiraDir);
+  store.dropIfDrained();
   for (const line of result.log) console.log(line);
   const code = exitCodeFor(result);
   if (code !== 0) Deno.exit(code);
@@ -213,14 +227,16 @@ export async function cmdAwait(argv: string[]): Promise<void> {
  * itself, is already executing — collect it with jt await instead).
  */
 export async function cmdCancel(): Promise<void> {
-  const { ws } = localContext();
-  const jiraDir = ws.jiraDir;
+  const { store } = localContext();
+  const jiraDir = store.proposalDir;
   const pending = readPending(jiraDir);
   if (!pending) {
     if (readResult(jiraDir)) {
       fail("nothing to cancel — the review already settled; run jt await to collect its outcome");
     }
-    fail("nothing to cancel — no review is pending");
+    fail(
+      `nothing to cancel — no review is pending${inProposal(store)}${reviewsElsewhere(store)}`,
+    );
   }
   if (pending.decidedAt) {
     fail("too late to cancel — the review was already decided; jt await reports the outcome");
@@ -251,5 +267,27 @@ export async function cmdCancel(): Promise<void> {
   }
   if (result) clearResult(jiraDir); // the server's own cancellation record — collected here
   clearPending(jiraDir);
+  store.dropIfDrained();
   console.log("review cancelled — nothing was sent");
+}
+
+function inProposal(store: Store): string {
+  return store.proposal === DEFAULT_PROPOSAL ? "" : ` in proposal '${store.proposal}'`;
+}
+
+/**
+ * An agent that forgot its -p would otherwise be told there is nothing to collect while
+ * its review sits live under another name — so name the reviews that do exist.
+ */
+function reviewsElsewhere(store: Store): string {
+  const lines: string[] = [];
+  for (const name of store.listProposals()) {
+    if (name === store.proposal) continue;
+    const dir = store.scoped(name).proposalDir;
+    const pending = readPending(dir);
+    const flag = explicitProposalFlag(name);
+    if (pending) lines.push(`  ${name}: review pending at ${pending.url} — jt await${flag}`);
+    else if (readResult(dir)) lines.push(`  ${name}: outcome uncollected — jt await${flag}`);
+  }
+  return lines.length ? `\nother proposals with a review in flight:\n${lines.join("\n")}` : "";
 }

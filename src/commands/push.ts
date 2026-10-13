@@ -1,15 +1,20 @@
 /**
- * jt push: the single remote-mutating verb — and it is approval-only.
+ * jt push: the single remote-mutating verb.
  *
- * Compiles committed−base into exact API ops (never reading the working tree), checks
- * remote staleness, then hands the changeset to a detached review server (see
- * src/commands/push_detach.ts) and prints its URL immediately. A human decision on
- * that page is the only thing that executes; no headless mutation path exists, and
- * `jt await` reports the decision's outcome. --dry-run prints the compiled plan and
- * stops. Executed ops are journaled with approval provenance.
+ * Compiles one proposal's committed−base into exact API ops (never reading the working
+ * tree), checks remote staleness, then hands the changeset to a detached review server
+ * (see src/commands/push_detach.ts) and prints its URL immediately; a human decision on
+ * that page executes it and `jt await` reports the outcome.
+ *
+ * The one path with no page: a changeset made ENTIRELY of changes the user's own
+ * settings auto-allow (src/settings.ts, src/autoallow.ts) is sent here, at once. That
+ * is the user's standing decision, not the agent's — and it is journaled as such.
+ * --dry-run prints the compiled plan and stops. Every executed op is journaled with
+ * how it was approved.
  */
 // deno-lint-ignore-file no-explicit-any
 import { parseArgs } from "@std/cli";
+import { type AutoVerdict, classifyChangeset, summarizeAuto } from "../autoallow.ts";
 import { chunks } from "../batch.ts";
 import {
   fieldEqual,
@@ -29,6 +34,9 @@ import { searchPage } from "../jira/search.ts";
 import { bold, cyan, dim, green, red, yellow } from "../render/colors.ts";
 import { clearPending, pidAlive, readPending, readResult, writeSpec } from "../review/handoff.ts";
 import { openerCommand, pushHandoffNotice } from "../review/nudge.ts";
+import { buildTicketPlans, describeChanges } from "../review/plan.ts";
+import { DEFAULT_PROPOSAL, proposalFlag } from "../proposal.ts";
+import { loadSettings, settingsPath } from "../settings.ts";
 import type { Store } from "../store.ts";
 import { fetchBaseEntry, integrateFetched } from "../sync.ts";
 import { spawnReviewServer } from "./push_detach.ts";
@@ -48,40 +56,93 @@ export type PushContext = ReturnType<typeof localContext> & { meta: Meta; client
 export async function cmdPush(argv: string[]): Promise<void> {
   const args = parseArgs(argv, { boolean: ["dry-run", "full"] });
   const ctx = withClient(withMeta(localContext()));
-  const jiraDir = ctx.ws.jiraDir;
+  const { store } = ctx;
+  const dir = store.proposalDir;
+  const flag = proposalFlag(store.proposal);
 
-  // One review at a time, and outcomes are collected exactly once: refuse while a
-  // page is live, and refuse to bury an uncollected outcome (its notes may matter).
-  const pending = readPending(jiraDir);
+  // One review at a time PER PROPOSAL, and outcomes are collected exactly once: refuse
+  // while this proposal's page is live, and refuse to bury an uncollected outcome (its
+  // notes may matter). Other proposals' reviews are none of this one's business.
+  const pending = readPending(dir);
   if (pending && pidAlive(pending.pid)) {
     fail(
       `a review is already pending: ${pending.url}\n` +
-        `  hand it to the user (${openerCommand(pending.url)}), then run jt await to collect\n` +
-        `  their decision — or jt cancel to withdraw it`,
+        `  hand it to the user (${openerCommand(pending.url)}), then run jt await${flag} to collect\n` +
+        `  their decision — or jt cancel${flag} to withdraw it`,
     );
   }
-  if (pending) clearPending(jiraDir); // stale: the server died without recording anything
-  if (readResult(jiraDir)) {
-    fail("the previous push finished but its outcome was never collected — run jt await first");
+  if (pending) clearPending(dir); // stale: the server died without recording anything
+  if (readResult(dir)) {
+    fail(
+      `the previous push finished but its outcome was never collected — run jt await${flag} first`,
+    );
   }
 
+  // Read the settings before anything else: a broken file must stop the push, not
+  // quietly decide which way the gate swings.
+  const settings = loadSettings();
   const compiled = await compilePush(ctx);
   await checkStaleness(ctx, compiled.existingKeys);
+  const verdict = classifyChangeset(
+    store,
+    buildTicketPlans(store, compiled.ops),
+    settings.autoAllow,
+  );
 
   if (args["dry-run"]) {
     printPlan(compiled.ops, compiled.warnings, { full: Boolean(args.full) });
-    console.log(`\n${cyan("dry-run")} — nothing sent`);
+    const auto = summarizeAuto(verdict);
+    if (auto.length) console.log(`\n${dim(`auto-allowed by your settings: ${auto.join(", ")}`)}`);
+    console.log(
+      `\n${cyan("dry-run")} — nothing sent` +
+        (verdict.allAuto ? dim(" (jt push would send this without a review page)") : ""),
+    );
     return;
   }
   for (const w of compiled.warnings) console.log(`${yellow("warning:")} ${w}`);
-  writeSpec(jiraDir, {
+
+  if (verdict.allAuto) {
+    await pushAutoAllowed(ctx, compiled, verdict);
+    return;
+  }
+
+  writeSpec(dir, {
     ops: compiled.ops,
     warnings: compiled.warnings,
     existingKeys: compiled.existingKeys,
+    verdict,
   });
-  const url = await spawnReviewServer(ctx.ws.root, jiraDir);
+  const url = await spawnReviewServer(ctx.ws.root, store);
   console.log(`${bold("review page:")} ${url}`);
-  console.log(pushHandoffNotice(url));
+  console.log(pushHandoffNotice(url, store.proposal));
+}
+
+/**
+ * Send a changeset the user's settings cover completely: no page, no await. Runs in
+ * the foreground so the caller gets the outcome from this one command.
+ */
+async function pushAutoAllowed(
+  ctx: PushContext,
+  compiled: CompiledPush,
+  verdict: AutoVerdict,
+): Promise<void> {
+  const n = compiled.ops.length;
+  console.log(
+    `${bold("auto-allowed")} by your settings (${settingsPath()}): ${verdict.rules.join(", ")}`,
+  );
+  console.log(dim("no review needed — sending now\n"));
+  const result = await executePush(ctx, compiled.ops, { verdict, autoApproved: true });
+  ctx.store.dropIfDrained();
+  console.log("");
+  console.log(dim(`journal: ${result.journalPath}`));
+  if (result.failure) {
+    fail(`push incomplete — ${result.okCount}/${n} ops applied; nothing is pending, do not jt await`);
+  }
+  const created = result.refMap.size
+    ? ` · created: ${[...result.refMap.entries()].map(([r, k]) => `${r} → ${bold(k)}`).join(", ")}`
+    : "";
+  console.log(green(`pushed ${n} operation${n === 1 ? "" : "s"} (auto-allowed)`) + created);
+  console.log(dim("DONE — there is no review page and nothing to await"));
 }
 
 /** Refuse (before any mutation) if remote moved past our base for any staged ticket. */
@@ -194,17 +255,34 @@ export interface PushResult {
   okCount: number;
 }
 
+/** How a push came to be allowed — journaled with it. */
+export interface PushApproval {
+  /** The human's decision on the review page. */
+  review?: JournalEntry["review"];
+  /** What the user's settings auto-allowed within this changeset. */
+  verdict?: AutoVerdict;
+  /** No human decided: the whole changeset was auto-allowed. */
+  autoApproved?: boolean;
+}
+
 /** Execute ops in order, settle all local layers against reality, journal, prune chain. */
 export async function executePush(
   ctx: PushContext,
   ops: CompiledOp[],
-  review?: JournalEntry["review"],
+  approval: PushApproval = {},
 ): Promise<PushResult> {
   const { store, client } = ctx;
+  const { review, verdict } = approval;
   const journal: JournalEntry = {
     startedAt: new Date().toISOString(),
     result: "success",
+    ...(store.proposal === DEFAULT_PROPOSAL ? {} : { proposal: store.proposal }),
     ...(review ? { review } : {}),
+    ...(approval.autoApproved
+      ? { autoApproved: { settings: settingsPath(), rules: verdict?.rules ?? [] } }
+      : {}),
+    // Taken now: settling below advances base, after which the delta is gone.
+    changes: describeChanges(store, buildTicketPlans(store, ops), verdict),
     ops: [],
     created: {},
   };
@@ -275,6 +353,12 @@ export async function executePush(
   journal.finishedAt = new Date().toISOString();
   journal.result = failure ? "partial" : "success";
   if (failure) journal.error = failure;
+  for (const change of journal.changes ?? []) {
+    const o = opOutcomes.get(change.id);
+    change.applied = !o || o.ok === 0 ? "none" : o.failed === 0 ? "all" : "partial";
+    const key = refMap.get(change.id);
+    if (key) change.key = key;
+  }
 
   // ---- settle local state against reality ----
   // The remote changes we just made came from the committed layer, so no 3-way
@@ -352,11 +436,15 @@ export async function executePush(
       const t = structuredClone(wf.ticket);
       if (rewriteRefs(t, refMap)) store.writeWorking(wf.id, t);
     }
-    for (const id of store.listCommittedIds()) {
-      const c = store.readCommitted(id);
-      if (!c) continue;
-      const t = structuredClone(c.ticket);
-      if (rewriteRefs(t, refMap)) store.writeCommitted(id, serializeTicket(t));
+    // Every proposal's committed copies, not just this one's: another proposal may be
+    // waiting on a ticket this push just created.
+    for (const s of store.listProposals().map((name) => store.scoped(name))) {
+      for (const id of s.listCommittedIds()) {
+        const c = s.readCommitted(id);
+        if (!c) continue;
+        const t = structuredClone(c.ticket);
+        if (rewriteRefs(t, refMap)) s.writeCommitted(id, serializeTicket(t));
+      }
     }
   }
 

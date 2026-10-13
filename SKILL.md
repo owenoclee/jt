@@ -86,6 +86,13 @@ jt await       # blocks until the human decides, then reports the outcome
 4. The entire changeset is sent only when the user selects **Approve & push** on that
    page.
 
+One outcome skips steps 3–4. The user can auto-allow kinds of change in their own
+settings (see "Auto-allowed changes"); when *every* change in the push is one of those,
+`jt push` sends it then and there and prints `auto-allowed ... DONE — there is no review
+page and nothing to await`. Read what push printed: a `review page:` line means the three
+steps below are owed; the auto-allowed line means the push is finished and `jt await`
+would only report that there is nothing to collect.
+
 ### Pushing is three steps, never one
 
 `jt push` returning is not a finished push — it is a page nobody has looked at yet.
@@ -117,7 +124,65 @@ when the user asks for edits outside the page — and is refused once the decisi
 landed. A new `jt push` refuses to start while a review is pending or an outcome is
 uncollected.
 
-`jt push --dry-run` prints the compiled operations without serving or sending.
+`jt push --dry-run` prints the compiled operations without serving or sending, and says
+which changes the user's settings auto-allow.
+
+## Proposals: working alongside other agents
+
+Every staged change belongs to a **proposal** — a named changeset with its own commits,
+its own review page, and its own outcome. Commands that name none use the default
+proposal, which is right when you are the only agent in the workspace.
+
+If other agents may be working in the same workspace — you were launched as one of
+several, you are a subagent, or `jt status` / `jt proposals` shows staged work you did
+not make — **name your proposal** and pass the same name to every command:
+
+```sh
+jt commit -p auth-cleanup PROJ-12 PROJ-15 -m "tighten session handling"
+jt push   -p auth-cleanup
+open <url>
+jt await  -p auth-cleanup
+```
+
+Pick a short name for the task (`auth-cleanup`, `q3-epics`): lowercase letters, digits,
+dashes. `--proposal NAME` and `JT_PROPOSAL=NAME` mean the same as `-p NAME`. There is no
+command to "switch" proposal — the name is given each time, so no agent can change it
+under another.
+
+- **Always give `jt commit -p NAME` explicit ids.** The working tree is shared, so other
+  agents' unfinished edits show as modified too; with a name and no ids, commit takes
+  only new edits to tickets your proposal already holds.
+- **One proposal per ticket.** If commit, restore, untrack, rm or archive reports that a
+  ticket `is staged in proposal 'x'`, another agent holds it. Do not release it yourself
+  with `-p x`; leave the ticket alone or ask the user.
+- Use the same `-p NAME` for `jt push`, `jt await`, `jt cancel`, `jt uncommit`, and
+  `jt diff --committed`. `jt push` prints the exact `jt await -p NAME` to run. An await
+  or cancel that names the wrong proposal finds nothing and lists the reviews that exist.
+- `jt status` shows the whole workspace; rows tagged `[proposal x]` are staged elsewhere.
+  `jt proposals` lists each proposal, its tickets, and whether its review is pending.
+- Do not edit a ticket file another proposal holds. `jt pull` is safe to run at any
+  time — it rebases every proposal's staged tickets.
+
+Several reviews can be open at once; each page's title names its proposal, so the user
+can tell them apart.
+
+## Auto-allowed changes
+
+The user may keep a settings file, `~/.config/jt/settings.json`, listing kinds of change
+that need no review — typically assignee changes, status transitions, and comments.
+`jt config show` prints the rules in force. Two consequences:
+
+- A push made **only** of auto-allowed changes is sent by `jt push` itself (see above).
+  Report it as done, saying it was auto-allowed and what it changed.
+- A push that **mixes** them with anything else goes to the review page whole; the
+  auto-allowed changes are shown greyed out and are sent only if the user approves.
+  Nothing is sent early, and the usual three steps apply.
+
+That file is the user's decision about what you may do unsupervised. **Never create,
+edit, or suggest edits to it on your own initiative**, and never restructure work to route
+around a review the user has not waived. If the user asks how to auto-allow something,
+show them the file's format (README, "Auto-allowed changes") and let them write it.
+Deletion is never auto-allowed.
 
 If the user requests edits, update the working file and commit another round. To omit
 a ticket while keeping its working edits, run `jt uncommit ID`; the next review page
@@ -161,15 +226,22 @@ exactly one of them — pick by which layer you need to move:
   search results — so treat that error as authoritative and never as evidence that
   tickets were deleted or a project is empty. It is a user action: tell them to mint a
   new token and update the source `jt config show` names. Do not retry in a loop.
-- The moment `jt push` prints the review URL, open it for the user with the OS
+- The moment `jt push` prints a review URL, open it for the user with the OS
   opener. Beyond that, never interact with a review page yourself — no fetching, no
   browser automation; the decision on it is the human's.
 - Never leave a review uncollected. `jt push` → open the URL → `jt await` is one
   indivisible sequence; a turn must not end with a review pending or an outcome
   uncollected.
 - `jt push` is itself the approval gate: nothing reaches Jira without the human's
-  explicit decision on the review page. Never ask permission to run it — that gates
-  the gate. Commit, push, and hand the user the URL.
+  explicit decision on the review page, or a standing one in their own settings file.
+  Never ask permission to run it — that gates the gate. Commit, push, and hand the user
+  the URL (or, for an auto-allowed push, report what was sent).
+- Never create or edit `~/.config/jt/settings.json`. It decides what is sent without
+  review, and that decision is the user's alone.
+- With other agents in the workspace, name your proposal (`-p NAME`) on every command,
+  commit explicit ids, and never act on another proposal's tickets.
+- If `jt` prints a notice that a newer version is available, tell the user once, with
+  the command it suggests. Do not run the update yourself; `jt` never updates itself.
 - Existing comments are append-only. Add a comment without an `id`; never edit or
   remove one with an `id`.
 - Existing ticket files retain their `<KEY>.json` name and `key` field.
@@ -268,8 +340,18 @@ jt diff --committed             # exactly what push will send
 jt show --web [KEY...]
 jt diff --web
 jt changes --web
-jt log
+jt proposals                    # every proposal: staged tickets and review state
+jt log                          # the last ten pushes
+jt log --today                  # everything sent to Jira today
+jt log --since 3d PROJ-123      # a window (90m, 12h, 3d, 2w, or a date) and/or tickets
+jt log --web --today            # the same history as a page for the user
 ```
+
+`jt log` is the audit trail of everything `jt` sent to Jira from this workspace: for
+each push, whether the user approved it on the review page or it was auto-allowed by
+their settings, which proposal it came from, and the field-level change to each ticket.
+When the user asks what happened — today, to a ticket, while they were away — answer
+from `jt log`, not from memory, and say which pushes went out without a review.
 
 Terminal output is compact by default; `--full` on `jt changes`, `jt log`, and
 `jt push --dry-run` prints the long form (description line diffs, every journal op,

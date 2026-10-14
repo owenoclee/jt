@@ -1,15 +1,11 @@
 /**
  * The agent skill (SKILL.md) ships inside the binary via a raw text import, so an
- * installed jt can always reproduce the contract that matches its own version.
+ * installed jt can always reproduce the contract that matches its own version. Copies
+ * installed by an older jt are refreshed by every later one (see src/skillsync.ts).
  */
 import { join } from "@std/path";
 import { fail } from "../errors.ts";
-import SKILL_MD from "../../SKILL.md" with { type: "text" };
-
-const SKILL_DIRS: Record<string, (home: string) => string> = {
-  "claude-code": (home) => join(home, ".claude", "skills", "jt"),
-  "codex": (home) => join(Deno.env.get("CODEX_HOME") ?? join(home, ".codex"), "skills", "jt"),
-};
+import { SKILL_DIRS, SKILL_MD } from "../skillsync.ts";
 
 const USAGE = `usage: jt skill show | jt skill install <${Object.keys(SKILL_DIRS).join("|")}>`;
 

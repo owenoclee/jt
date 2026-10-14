@@ -26,6 +26,7 @@ import { UserError } from "./errors.ts";
 import { JiraApiError } from "./jira/client.ts";
 import { extractProposalFlag, setActiveProposal } from "./proposal.ts";
 import { bold, red } from "./render/colors.ts";
+import { skillSyncEnabled, syncInstalledSkills } from "./skillsync.ts";
 import { startUpdateCheck, updateCheckEnabled } from "./update.ts";
 import { VERSION } from "./version.ts";
 
@@ -204,6 +205,9 @@ if (import.meta.main) {
     const { proposal, rest } = extractProposalFlag(Deno.args);
     if (proposal !== null) setActiveProposal(proposal);
     const advise = updateCheckEnabled(rest[0]) ? startUpdateCheck(rest[0]) : null;
+    // Before the command, not after: a stale skill is most likely to show up as a failed
+    // command, and an error (or jt await's own exit) would skip anything printed later.
+    if (skillSyncEnabled(rest[0])) await syncInstalledSkills();
     await main(rest);
     await advise?.();
   } catch (e) {

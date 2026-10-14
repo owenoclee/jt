@@ -4,7 +4,7 @@
  * rejected at commit time instead of failing mid-push.
  */
 import { parseArgs } from "@std/cli";
-import { ticketsEqual } from "../canonical.ts";
+import { fieldEqual, ticketsEqual } from "../canonical.ts";
 import { appendChainEntry, type ChainSnapshot } from "../chain.ts";
 import { localContext, withMeta } from "../context.ts";
 import { diffComments } from "../diff.ts";
@@ -130,10 +130,16 @@ function validateForCommit(store: Store, meta: Meta, id: string, t: Ticket): voi
     }
   };
 
-  check(() => resolveIssueType(meta, t.type));
-  if (t.status) check(() => checkStatusKnown(meta, t.status!));
-  if (t.priority !== null) check(() => resolvePriority(meta, t.priority!));
-  if (t.sprint !== null) check(() => resolveSprint(meta, t.sprint!));
+  const base = id.startsWith("@") ? null : store.readBase(id);
+  // Only what the commit changes gets resolved against meta, as push only sends
+  // what changed. Meta is a partial view (e.g. just one board's open sprints), and
+  // a value Jira already holds must not block editing the rest of the ticket.
+  const changed = (field: string) => !base || !fieldEqual(base.ticket, t, field);
+
+  if (changed("type")) check(() => resolveIssueType(meta, t.type));
+  if (t.status && changed("status")) check(() => checkStatusKnown(meta, t.status!));
+  if (t.priority !== null && changed("priority")) check(() => resolvePriority(meta, t.priority!));
+  if (t.sprint !== null && changed("sprint")) check(() => resolveSprint(meta, t.sprint!));
   if (t.description !== null) check(() => mdToAdf(t.description!, "description"));
   for (const alias of Object.keys(t.fields)) check(() => resolveFieldAlias(meta, alias));
   for (const link of t.links) {
@@ -147,7 +153,6 @@ function validateForCommit(store: Store, meta: Meta, id: string, t: Ticket): voi
     problems.push(`parent '${t.parent}' has no working file`);
   }
 
-  const base = id.startsWith("@") ? null : store.readBase(id);
   if (base) {
     const cd = diffComments(base.ticket.comments, t.comments);
     if (cd.editedExisting.length) {

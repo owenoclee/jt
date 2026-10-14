@@ -76,6 +76,14 @@ export function renderHomebrewFormula(options: FormulaOptions): string {
     bin.install "jt"
   end
 
+  def caveats
+    <<~EOS
+      To let your coding agent use jt, install its skill:
+        jt skill install claude-code   # or: jt skill install codex
+      After an upgrade, jt refreshes an installed skill by itself.
+    EOS
+  end
+
   test do
     assert_match version.to_s, shell_output("#{bin}/jt --version")
   end

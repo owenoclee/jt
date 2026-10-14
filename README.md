@@ -306,8 +306,9 @@ credential source in use — rather than pulling an empty result set over your m
 
 [SKILL.md](SKILL.md) is the agent contract. Install it with `jt skill install
 claude-code` or `jt skill install codex`, or print it with `jt skill show` and
-redirect it wherever your agent discovers skills. Allow local/read-only `jt` commands
-as appropriate. `jt push` is the only command that can mutate Jira, and it requires user
+redirect it wherever your agent discovers skills. After an upgrade, jt refreshes an
+installed skill to match itself on its next run; a copy you have edited is left alone,
+with a warning. Allow local/read-only `jt` commands as appropriate. `jt push` is the only command that can mutate Jira, and it requires user
 confirmation through the browser UI for everything except the kinds of change you have
 auto-allowed in `~/.config/jt/settings.json`.
 

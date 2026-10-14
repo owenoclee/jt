@@ -18,6 +18,7 @@ Deno.test("Homebrew formula selects checksummed macOS archives by architecture",
   assertStringIncludes(formula, `intel: "${INTEL_SHA}"`);
   assertStringIncludes(formula, "depends_on :macos");
   assertStringIncludes(formula, 'bin.install "jt"');
+  assertStringIncludes(formula, "jt skill install claude-code");
   assertStringIncludes(formula, 'shell_output("#{bin}/jt --version")');
   assertStringIncludes(formula, "class Jt < Formula");
   assertStringIncludes(formula, 'conflicts_with "owenoclee/tap/jt-rc"');

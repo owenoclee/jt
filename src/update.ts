@@ -114,7 +114,7 @@ async function fetchReleaseList(signal: AbortSignal): Promise<ReleaseInfo[]> {
 }
 
 /** Commands whose output is consumed by something other than a person or agent reading it. */
-const SILENT_COMMANDS = new Set(["_push-serve", "schema", "skill"]);
+export const SILENT_COMMANDS = new Set(["_push-serve", "schema", "skill"]);
 /** Commands that may show known advice but never go to the network for it. */
 const OFFLINE_COMMANDS = new Set(["version", "--version", "help", "--help", "-h"]);
 

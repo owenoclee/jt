@@ -8,7 +8,12 @@
  */
 import type { AutoVerdict } from "../autoallow.ts";
 import { readChain, writeReviewMarker } from "../chain.ts";
-import { checkStaleness, executePush, type PushContext } from "../commands/push.ts";
+import {
+  checkStaleness,
+  executePush,
+  leftoverNotice,
+  type PushContext,
+} from "../commands/push.ts";
 import type { CompiledPush } from "../compile.ts";
 import { UserError } from "../errors.ts";
 import { makeRefContext } from "../refs.ts";
@@ -95,6 +100,8 @@ export async function runReviewFlow(
     : "";
   if (result.failure) {
     console.log(red(`push incomplete — ${result.okCount}/${compiled.ops.length} ops applied`));
+    const left = leftoverNotice(store);
+    if (left) console.log(left);
   } else {
     console.log(
       green(`approved and pushed ${compiled.ops.length} operation${compiled.ops.length === 1 ? "" : "s"}`) +

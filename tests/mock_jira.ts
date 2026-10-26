@@ -44,6 +44,13 @@ export class MockJira {
   rejectKeyInSearch = false;
   /** Archiving is a Premium/Enterprise feature; off, the archive call 400s like Jira's. */
   archivingEnabled = true;
+  /**
+   * Field ids missing from each issue type's edit screen: left out of editmeta, and a
+   * PUT that sets one is refused with Jira's 400.
+   */
+  offScreen: Record<string, string[]> = {};
+  /** Answer a request before it is handled — how a test makes one op fail. Null passes. */
+  intercept: ((method: string, path: string) => Response | null) | null = null;
   #issueCounter = 1;
   #idCounter = 1000;
   #clock = 0;
@@ -100,6 +107,8 @@ export class MockJira {
       ? await req.json().catch(() => undefined)
       : undefined;
     this.requestLog.push({ method: req.method, path, body });
+    const intercepted = this.intercept?.(req.method, path);
+    if (intercepted) return intercepted;
 
     const json = (data: unknown, status = 200) =>
       new Response(JSON.stringify(data), {
@@ -198,6 +207,18 @@ export class MockJira {
       if (!issue) return notFound();
       if (req.method === "GET") return json(this.#render(issue));
       if (req.method === "PUT") {
+        const off = this.offScreen[issue.issuetype] ?? [];
+        const refused = Object.keys(body.fields ?? {}).filter((id) => off.includes(id));
+        if (refused.length) {
+          // Jira's wording, for a field that exists but is not on this issue's screen.
+          return json({
+            errorMessages: [],
+            errors: Object.fromEntries(refused.map((id) => [
+              id,
+              `Field '${id}' cannot be set. It is not on the appropriate screen, or unknown.`,
+            ])),
+          }, 400);
+        }
         this.#applyUpdate(issue, body.fields ?? {});
         return new Response(null, { status: 204 });
       }
@@ -244,6 +265,17 @@ export class MockJira {
         numberOfIssuesUpdated: updated,
         errors: errors.length ? { issuesInError: errors } : {},
       });
+    }
+
+    const editmetaMatch = path.match(/^\/rest\/api\/3\/issue\/([A-Z]+-\d+)\/editmeta$/);
+    if (editmetaMatch && req.method === "GET") {
+      const issue = this.issues.get(editmetaMatch[1]);
+      if (!issue) return notFound();
+      const off = this.offScreen[issue.issuetype] ?? [];
+      const ids = ["summary", "description", "labels", "priority", "assignee", "parent"]
+        .concat(["issuetype", "customfield_10016", "customfield_10020"])
+        .filter((id) => !off.includes(id));
+      return json({ fields: Object.fromEntries(ids.map((id) => [id, { key: id }])) });
     }
 
     const transMatch = path.match(/^\/rest\/api\/3\/issue\/([A-Z]+-\d+)\/transitions$/);

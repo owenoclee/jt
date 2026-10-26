@@ -110,6 +110,13 @@ Every push owes two more steps, immediately and in this order:
    sends nothing; per-ticket notes arrive on stdout), and `1` for staleness, push
    failure, or a cancelled review.
 
+A push sends its operations in order and stops at the first one Jira refuses. Whatever
+was already sent stays done. The rest stays staged in its proposal, and `jt status` and
+`jt proposals` mark it as left over from that push. That is not new work: the user
+approved it, and it never arrived. Show the user what failed (`jt log KEY`). Whether to
+fix it and push again or drop it with `jt uncommit` is their decision, including when
+you find leftovers from an earlier session.
+
 Until `jt await` returns, the push is outstanding: do not report it as done, do not
 claim anything reached Jira, and do not move on to unrelated work. If you are about to
 end your turn with a review still pending, run `jt await` first. `jt push` prints both
@@ -281,6 +288,15 @@ exactly one of them — pick by which layer you need to move:
 
 `key` and `updated` are absent on new tickets. `status` may also be absent, allowing
 Jira's default. `parent`, `sprint`, `assignee`, and `priority` may be `null`.
+
+`fields` holds the custom fields named in `customFields`. A missing key and `null` both
+mean "no value", and neither is sent. A key can be missing because the ticket was
+fetched before the field was configured, or because Jira does not have that field on
+the issue at all. Jira only lets a field be set when it is on the issue's edit screen,
+and screens often differ by issue type. `jt push` checks this before sending anything
+and names each ticket and field it would refuse. Revert those fields, commit again, and
+push. Putting a field on a screen is a Jira configuration change, so leave it to the
+user.
 
 Markdown supports headings, paragraphs, lists, fenced code, blockquotes, rules,
 emphasis, inline code, strikethrough, and links. Tables, images, and raw HTML are

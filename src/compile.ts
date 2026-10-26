@@ -13,7 +13,7 @@ import { fieldEqual } from "./canonical.ts";
 import { diffComments, diffTickets } from "./diff.ts";
 import { intentOp } from "./intents.ts";
 import { fail } from "./errors.ts";
-import type { JiraClient } from "./jira/client.ts";
+import { JiraApiError, type JiraClient } from "./jira/client.ts";
 import { DEFAULT_PROPOSAL, proposalFlag } from "./proposal.ts";
 import {
   checkStatusKnown,
@@ -85,6 +85,7 @@ export async function compilePush(ctx: CompileContext): Promise<CompiledPush> {
   const transitionOps: CompiledOp[] = [];
   const commentOps: CompiledOp[] = [];
   const seenLinks = new Set<string>();
+  const seenUnlinks = new Set<string>();
 
   // ---- creates, parents before children ----
   const createTickets = new Map<string, Ticket>();
@@ -150,6 +151,45 @@ export async function compilePush(ctx: CompileContext): Promise<CompiledPush> {
     }
   }
 
+  // A custom field that is not on an issue's edit screen fails that issue's whole PUT
+  // with a 400 ("cannot be set. It is not on the appropriate screen, or unknown") —
+  // mid-push, after earlier ops have landed. Ask Jira's editmeta first, and refuse
+  // here instead, before anything is sent.
+  {
+    const targets: [string, Ticket, string[]][] = [];
+    for (const key of updateKeys) {
+      const committed = store.readCommitted(key);
+      const base = store.readBase(key);
+      if (!committed || !base) continue;
+      const aliases = changedCustomFields(base.ticket, committed.ticket);
+      if (aliases.length) targets.push([key, committed.ticket, aliases]);
+    }
+    const refused = new Map<string, string[]>();
+    for (const group of chunks(targets, 8)) {
+      await Promise.all(group.map(async ([key, , aliases]) => {
+        const editable = await editableFieldIds(ctx.client, key);
+        if (!editable) return; // Jira gave no answer; the push itself will find out
+        const off = aliases.filter((a) => !editable.has(resolveFieldAlias(meta, a).id));
+        if (off.length) refused.set(key, off);
+      }));
+    }
+    if (refused.size > 0) {
+      const lines = targets
+        .filter(([key]) => refused.has(key))
+        .map(([key, t]) => {
+          const names = refused.get(key)!.map((a) => `'${a}'`).join(", ");
+          return `  - ${key} (${t.type}): ${names}`;
+        });
+      fail(
+        `Jira will not let these fields be set — they are not on the issue's edit screen, ` +
+          `usually because the field does not apply to that issue type:\n${lines.join("\n")}\n` +
+          `Nothing was sent. Put each field back to its base value in the working file ` +
+          `(jt show KEY --base), jt commit KEY, then push again. Adding the field to that ` +
+          `screen is a Jira configuration change: the user's call, not the agent's.`,
+      );
+    }
+  }
+
   for (const key of updateKeys) {
     const committed = store.readCommitted(key);
     const base = store.readBase(key);
@@ -195,6 +235,9 @@ export async function compilePush(ctx: CompileContext): Promise<CompiledPush> {
           if (!linkId) {
             fail(`${key}: cannot unlink '${link.type} ${link.to}' — link id unknown; run jt pull`);
           }
+          // Removed from both ends is still one link: Jira deletes it once, by id.
+          if (seenUnlinks.has(linkId)) continue;
+          seenUnlinks.add(linkId);
           unlinkOps.push({
             label: `unlink ${key} '${link.type} ${link.to}'`,
             kind: "unlink",
@@ -379,13 +422,34 @@ async function compileFieldUpdates(
       ? null
       : resolveSprint(meta, committed.sprint).id;
   }
-  for (const alias of new Set([...Object.keys(base.fields), ...Object.keys(committed.fields)])) {
-    if (fieldEqual(base, committed, `fields.${alias}`)) continue;
+  for (const alias of changedCustomFields(base, committed)) {
     const fm = resolveFieldAlias(meta, alias);
     const value = committed.fields[alias] ?? null;
     fields[fm.id] = value === null ? null : compileCustomValue(fm, value, alias);
   }
   return fields;
+}
+
+/** Aliases of the custom fields whose value `committed` changes from `base`. */
+function changedCustomFields(base: Ticket, committed: Ticket): string[] {
+  return [...new Set([...Object.keys(base.fields), ...Object.keys(committed.fields)])]
+    .filter((alias) => !fieldEqual(base, committed, `fields.${alias}`));
+}
+
+/**
+ * The field ids `key`'s edit screen lets this user set, per Jira's editmeta — or null
+ * when Jira gives no usable answer: an error, or no fields at all (what a user without
+ * edit permission sees). Null means unknown, never "nothing is editable".
+ */
+async function editableFieldIds(client: JiraClient, key: string): Promise<Set<string> | null> {
+  try {
+    const res = (await client.get(`/rest/api/3/issue/${key}/editmeta`)) as any;
+    const ids = Object.keys(res?.fields ?? {});
+    return ids.length > 0 ? new Set(ids) : null;
+  } catch (e) {
+    if (e instanceof JiraApiError && !e.authRejected) return null;
+    throw e;
+  }
 }
 
 function compileCustomValue(fm: MetaField, value: unknown, alias: string): unknown {
@@ -426,7 +490,13 @@ function pushLinkOp(
   // "A blocks B" (outward phrase on A) is stored as {inwardIssue: A, outwardIssue: B}:
   // outwardIssue is the target of the outward phrase. Verified against a live instance.
   const [inward, outward] = lt.direction === "outward" ? [issue, link.to] : [link.to, issue];
-  const canonical = `${lt.id}|${inward}|${outward}`;
+  // A symmetric type ("relates to" both ways) reads the same from either end, so
+  // A's "relates to B" and B's "relates to A" are one link — but sent as two POSTs,
+  // Jira would store A→B and B→A as two. Key those by the unordered pair.
+  const symmetric = lt.inward.toLowerCase() === lt.outward.toLowerCase();
+  const canonical = symmetric
+    ? `${lt.id}|${[inward, outward].sort().join("|")}`
+    : `${lt.id}|${inward}|${outward}`;
   if (seen.has(canonical)) return; // same link staged from both sides
   seen.add(canonical);
   linkOps.push({

@@ -35,10 +35,10 @@ import { bold, cyan, dim, green, red, yellow } from "../render/colors.ts";
 import { clearPending, pidAlive, readPending, readResult, writeSpec } from "../review/handoff.ts";
 import { openerCommand, pushHandoffNotice } from "../review/nudge.ts";
 import { buildTicketPlans, describeChanges } from "../review/plan.ts";
-import { DEFAULT_PROPOSAL, proposalFlag } from "../proposal.ts";
+import { DEFAULT_PROPOSAL, leftoverAdvice, proposalFlag } from "../proposal.ts";
 import { loadSettings, settingsPath } from "../settings.ts";
 import type { Store } from "../store.ts";
-import { fetchBaseEntry, integrateFetched } from "../sync.ts";
+import { fetchBaseEntry, integrateFetched, rebaseFields } from "../sync.ts";
 import { spawnReviewServer } from "./push_detach.ts";
 import type {
   BaseEntry,
@@ -136,13 +136,25 @@ async function pushAutoAllowed(
   console.log("");
   console.log(dim(`journal: ${result.journalPath}`));
   if (result.failure) {
-    fail(`push incomplete — ${result.okCount}/${n} ops applied; nothing is pending, do not jt await`);
+    const left = leftoverNotice(ctx.store);
+    fail(
+      `push incomplete — ${result.okCount}/${n} ops applied; nothing is pending, do not jt await` +
+        (left ? `\n${left}` : ""),
+    );
   }
   const created = result.refMap.size
     ? ` · created: ${[...result.refMap.entries()].map(([r, k]) => `${r} → ${bold(k)}`).join(", ")}`
     : "";
   console.log(green(`pushed ${n} operation${n === 1 ? "" : "s"} (auto-allowed)`) + created);
   console.log(dim("DONE — there is no review page and nothing to await"));
+}
+
+/** After a push stopped at a failure: what it left staged, and what that is — or null. */
+export function leftoverNotice(store: Store): string | null {
+  const left = store.leftovers();
+  if (!left) return null;
+  return `${yellow("still staged:")} ${left.ids.join(", ")} — ` +
+    leftoverAdvice(left.ids, proposalFlag(store.proposal));
 }
 
 /** Refuse (before any mutation) if remote moved past our base for any staged ticket. */
@@ -286,6 +298,10 @@ export async function executePush(
     ops: [],
     created: {},
   };
+  // A ticket can drain without ops of its own — its only change was a link that the
+  // other end's op carried — so the chain prunes from everything staged, not just
+  // from the issues ops ran on.
+  const stagedBefore = store.listCommittedIds();
   const refMap = new Map<string, string>();
   const opOutcomes = new Map<string, { ok: number; failed: number }>();
   const postedComments = new Map<string, string[]>();
@@ -314,19 +330,28 @@ export async function executePush(
         body = { transition: { id: transitionId } };
         rec.body = body;
       }
-      const response = await client.request(resolved.method, resolved.path, body);
+      let response: unknown = null;
+      let alreadyGone = false;
+      try {
+        response = await client.request(resolved.method, resolved.path, body);
+      } catch (e) {
+        if (!isLinkAlreadyGone(resolved, e)) throw e;
+        alreadyGone = true;
+      }
       if (resolved.kind === "archive" || resolved.kind === "unarchive") {
         const refused = intentFailure(resolved.kind, resolved.issue, response);
         if (refused) throw new Error(refused);
       }
       rec.ok = true;
-      rec.status = 200;
+      rec.status = alreadyGone ? 404 : 200;
       if (resolved.kind === "create") {
         const key = (response as any)?.key;
         if (!key) throw new Error("create returned no issue key");
         refMap.set(op.refId!, key);
         journal.created![op.refId!] = key;
         console.log(`  ${green("✓")} ${resolved.label} ${bold(`→ ${key}`)}`);
+      } else if (alreadyGone) {
+        console.log(`  ${green("✓")} ${resolved.label} ${dim("(already gone from Jira)")}`);
       } else {
         console.log(`  ${green("✓")} ${resolved.label}`);
       }
@@ -512,25 +537,32 @@ export async function executePush(
     }
     store.writeBase(fresh);
     advanceSeen(store, key, oldBase.ticket, fresh.ticket, committed?.ticket ?? null, posted);
+    // Both local layers, so a field either one changed stays theirs when rebasing.
+    const local = [committed?.ticket, working?.ticket].filter((t): t is Ticket => Boolean(t));
     if (o.failed === 0) {
       store.removeCommitted(key);
       if (!working || (committed && working.bytes === committed.bytes)) {
         store.writeWorking(key, fresh.ticket);
       } else {
-        const t = structuredClone(working.ticket);
+        // Edited since commit: keep those edits, on top of the fresh remote state.
+        const t = rebaseFields(working.ticket, oldBase.ticket, fresh.ticket, local);
         t.comments = reconcileComments(fresh.ticket.comments, t.comments, posted);
         store.writeWorking(key, t);
       }
     } else {
-      // Partial: keep the remaining delta committed (minus what landed).
+      // Partial: keep the remaining delta committed (minus what landed). Base just
+      // moved to fresh remote state, so every field the delta leaves alone follows
+      // it — otherwise whatever changed remotely meanwhile (a field newly added to
+      // customFields, an automation's side effect) would read as a local edit, and
+      // the next push would send it back.
       if (committed) {
-        const t = structuredClone(committed.ticket);
+        const t = rebaseFields(committed.ticket, oldBase.ticket, fresh.ticket, local);
         t.comments = reconcileComments(fresh.ticket.comments, t.comments, posted);
         if (ticketsEqual(t, fresh.ticket)) store.removeCommitted(key);
         else store.writeCommitted(key, serializeTicket(t));
       }
       if (working) {
-        const t = structuredClone(working.ticket);
+        const t = rebaseFields(working.ticket, oldBase.ticket, fresh.ticket, local);
         t.comments = reconcileComments(fresh.ticket.comments, t.comments, posted);
         store.writeWorking(key, t);
       }
@@ -557,7 +589,7 @@ export async function executePush(
   const committedIntents = new Set(
     store.readIntents().filter((i) => i.committed).map((i) => i.key),
   );
-  const drained = [...new Set([...opOutcomes.keys(), ...refMap.keys()])].filter(
+  const drained = [...new Set([...opOutcomes.keys(), ...refMap.keys(), ...stagedBefore])].filter(
     (id) => !committedNow.has(id) && !committedIntents.has(id),
   );
   pruneChain(store, drained);
@@ -570,6 +602,15 @@ export async function executePush(
     failure,
     okCount: journal.ops.filter((o) => o.ok).length,
   };
+}
+
+/**
+ * A DELETE of a link Jira no longer has: it was removed already — by hand, or by an
+ * earlier push that stopped short. That is the state the DELETE was sent to reach, so
+ * it counts as done instead of failing the push.
+ */
+function isLinkAlreadyGone(op: CompiledOp, e: unknown): boolean {
+  return op.kind === "unlink" && e instanceof JiraApiError && e.status === 404 && !e.authRejected;
 }
 
 async function tryFetch(ctx: PushContext, key: string): Promise<BaseEntry | null> {

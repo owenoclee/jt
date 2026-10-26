@@ -72,6 +72,19 @@ export function proposalFlag(name: string): string {
   return name === DEFAULT_PROPOSAL ? "" : ` -p ${name}`;
 }
 
+/**
+ * What to do about changes a partial push left staged — for an agent that may come
+ * across them long after, with none of the context: they were approved but never
+ * sent, and whether to retry or drop them is the user's decision.
+ */
+export function leftoverAdvice(ids: string[], flag: string): string {
+  const list = ids.join(" ");
+  return `not new work: approved, but the push stopped before sending ${
+    ids.length === 1 ? "it" : "them"
+  } (jt log ${list} says why). Retry with jt push${flag}, or drop with ` +
+    `jt uncommit${flag} ${list} — ask the user which.`;
+}
+
 /** " -p NAME" always — for hints that send the reader to ANOTHER proposal, default included. */
 export function explicitProposalFlag(name: string): string {
   return ` -p ${name}`;

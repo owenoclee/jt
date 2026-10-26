@@ -252,6 +252,11 @@ subset.
 It does not manage boards, sprints, plans, goals, users, permissions, or workflows.
 
 - `jt push` refuses if a staged ticket changed remotely after the last fetch.
+- `jt push` also refuses, before sending anything, a custom field that is not on the
+  issue's edit screen in Jira, since Jira would reject it partway through the push.
+  A missing custom-field key and `null` both mean no value, and neither one is sent.
+- A push stops at the first operation Jira refuses. Whatever did not land stays
+  staged, and `jt status` and `jt proposals` mark it as left over from that push.
 - `jt archive KEY` stages archiving and `jt unarchive KEY` reverses it; `jt rm KEY`
   stages permanent deletion. Jira is untouched until committed and approved.
 - Existing comments cannot be edited or removed.

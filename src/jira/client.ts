@@ -11,6 +11,8 @@ export class JiraApiError extends Error {
     public method: string,
     public path: string,
     public body?: unknown,
+    /** Jira refused the credentials: the status then says nothing about the resource. */
+    public authRejected = false,
   ) {
     super(message);
   }
@@ -81,6 +83,7 @@ export class JiraClient {
           method,
           path,
           seen,
+          true,
         );
       }
 

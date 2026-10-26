@@ -1,18 +1,30 @@
-import { assertEquals, assertRejects } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { serializeTicket } from "../src/canonical.ts";
 import { compilePush } from "../src/compile.ts";
 import { UserError } from "../src/errors.ts";
-import type { JiraClient } from "../src/jira/client.ts";
+import { JiraApiError, type JiraClient } from "../src/jira/client.ts";
 import { makeBaseEntry, makeMeta, makeTicket, tempStore } from "./helpers.ts";
 import type { Store } from "../src/store.ts";
 
 const meta = makeMeta();
 
-/** Fake client: only the endpoints compile needs (transitions + user search). */
-function fakeClient(): JiraClient {
+/**
+ * Fake client: only the endpoints compile needs (transitions, user search, editmeta).
+ * Every known field is on every edit screen, except the ids `offScreen` names per issue.
+ */
+function fakeClient(offScreen: Record<string, string[]> = {}): JiraClient {
   return {
     // deno-lint-ignore no-explicit-any
     get(path: string): Promise<any> {
+      const editmeta = path.match(/\/issue\/([A-Z]+-\d+)\/editmeta$/);
+      if (editmeta) {
+        const off = new Set(offScreen[editmeta[1]] ?? []);
+        return Promise.resolve({
+          fields: Object.fromEntries(
+            meta.fields.filter((f) => !off.has(f.id)).map((f) => [f.id, { name: f.name }]),
+          ),
+        });
+      }
       if (path.endsWith("/transitions")) {
         return Promise.resolve({
           transitions: [
@@ -32,8 +44,8 @@ function fakeClient(): JiraClient {
   } as unknown as JiraClient;
 }
 
-function ctx(store: Store) {
-  return { store, meta, client: fakeClient() };
+function ctx(store: Store, offScreen: Record<string, string[]> = {}) {
+  return { store, meta, client: fakeClient(offScreen) };
 }
 
 Deno.test("push compiles from committed layer only — working-tree tampering is invisible", async () => {
@@ -214,6 +226,103 @@ Deno.test("unlink uses the stored link id", async () => {
   assertEquals(ops.length, 1);
   assertEquals(ops[0].kind, "unlink");
   assertEquals(ops[0].path, "/rest/api/3/issueLink/9999");
+});
+
+Deno.test("a link removed from both ends compiles to one DELETE", async () => {
+  const store = tempStore();
+  const raw = (linkIds: Record<string, string>) => ({
+    raw: { descriptionAdf: null, sprintId: null, assigneeAccountId: null, statusId: "1", linkIds },
+  });
+  const a = makeTicket({ key: "TST-40", links: [{ type: "relates to", to: "TST-41" }] });
+  const b = makeTicket({ key: "TST-41", links: [{ type: "relates to", to: "TST-40" }] });
+  // One Jira link, seen from each end — the same id on both.
+  store.writeBase(makeBaseEntry(a, raw({ "relates to|TST-41": "9001" })));
+  store.writeBase(makeBaseEntry(b, raw({ "relates to|TST-40": "9001" })));
+  store.writeCommitted("TST-40", serializeTicket({ ...a, links: [] }));
+  store.writeCommitted("TST-41", serializeTicket({ ...b, links: [] }));
+
+  const { ops } = await compilePush(ctx(store));
+  assertEquals(ops.map((o) => [o.method, o.path]), [["DELETE", "/rest/api/3/issueLink/9001"]]);
+});
+
+Deno.test("a symmetric link added from both ends compiles to one POST", async () => {
+  const store = tempStore();
+  const a = makeTicket({ key: "TST-42" });
+  const b = makeTicket({ key: "TST-43" });
+  store.writeBase(makeBaseEntry(a));
+  store.writeBase(makeBaseEntry(b));
+  // "relates to" reads the same from both ends; sent twice, Jira would keep two links.
+  store.writeCommitted("TST-42", serializeTicket({ ...a, links: [{ type: "relates to", to: "TST-43" }] }));
+  store.writeCommitted("TST-43", serializeTicket({ ...b, links: [{ type: "relates to", to: "TST-42" }] }));
+
+  const { ops } = await compilePush(ctx(store));
+  assertEquals(ops.length, 1);
+  assertEquals(ops[0].body, {
+    type: { name: "Relates" },
+    inwardIssue: { key: "TST-42" },
+    outwardIssue: { key: "TST-43" },
+  });
+});
+
+Deno.test("a custom field absent from the committed copy and null in base is no change", async () => {
+  const store = tempStore();
+  // Base was refetched after "Team" joined customFields; the committed copy predates it.
+  const base = makeTicket({ key: "TST-44", type: "Epic", fields: { "Story Points": 3, Team: null } });
+  store.writeBase(makeBaseEntry(base));
+  store.writeCommitted(
+    "TST-44",
+    serializeTicket({ ...base, status: "In Progress", fields: { "Story Points": 3 } }),
+  );
+
+  const { ops } = await compilePush(ctx(store));
+  assertEquals(ops.map((o) => o.kind), ["transition"], "no PUT clearing a field that has no value");
+});
+
+Deno.test("a custom field off the issue's edit screen is refused before anything is sent", async () => {
+  const store = tempStore();
+  const epic = makeTicket({ key: "TST-45", type: "Epic", fields: { Team: null } });
+  const task = makeTicket({ key: "TST-46", fields: { Team: null } });
+  store.writeBase(makeBaseEntry(epic));
+  store.writeBase(makeBaseEntry(task));
+  store.writeCommitted("TST-45", serializeTicket({ ...epic, fields: { Team: "Platform" } }));
+  store.writeCommitted("TST-46", serializeTicket({ ...task, fields: { Team: "Platform" } }));
+
+  const err = await assertRejects(
+    () => compilePush(ctx(store, { "TST-45": ["customfield_10050"] })),
+    UserError,
+  );
+  assertStringIncludes(err.message, "TST-45 (Epic): 'Team'");
+  assertStringIncludes(err.message, "Nothing was sent");
+  assert(!err.message.includes("TST-46"), "the Task's screen has the field");
+
+  // Clearing it is a write too, and Jira refuses that just the same.
+  store.writeBase(makeBaseEntry({ ...epic, fields: { Team: "Platform" } }));
+  store.writeCommitted("TST-45", serializeTicket({ ...epic, fields: { Team: null } }));
+  store.removeCommitted("TST-46");
+  await assertRejects(
+    () => compilePush(ctx(store, { "TST-45": ["customfield_10050"] })),
+    UserError,
+    "TST-45 (Epic): 'Team'",
+  );
+});
+
+Deno.test("when Jira will not describe the edit screen, compile leaves the field to the push", async () => {
+  const store = tempStore();
+  const base = makeTicket({ key: "TST-47", fields: { Team: null } });
+  store.writeBase(makeBaseEntry(base));
+  store.writeCommitted("TST-47", serializeTicket({ ...base, fields: { Team: "Platform" } }));
+  const client = {
+    get(path: string) {
+      if (path.endsWith("/editmeta")) {
+        return Promise.reject(new JiraApiError("forbidden", 403, "GET", path));
+      }
+      return fakeClient().get(path);
+    },
+  } as unknown as JiraClient;
+
+  const { ops } = await compilePush({ store, meta, client });
+  // deno-lint-ignore no-explicit-any
+  assertEquals((ops[0].body as any).fields, { customfield_10050: { value: "Platform" } });
 });
 
 Deno.test("new comments compile to comment ops; edited existing comments are fatal", async () => {

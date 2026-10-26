@@ -1,5 +1,5 @@
 /** The jt version. Release tags must match it exactly (see docs/releasing.md). */
-export const VERSION = "0.6.0-rc.3";
+export const VERSION = "0.6.0-rc.4";
 
 /** Where releases are published — and where the update check looks. */
 export const REPO = "owenoclee/jt";

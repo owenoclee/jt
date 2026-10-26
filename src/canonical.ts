@@ -97,6 +97,8 @@ function serializeForCompare(t: Ticket): string {
   const n = normalizeTicket(t);
   delete n.descriptionLossy;
   delete n.updated;
+  // An absent custom-field key and null are the same value (see fieldEqual).
+  for (const k of Object.keys(n.fields)) if (n.fields[k] === null) delete n.fields[k];
   return serializeTicket(n);
 }
 
@@ -141,9 +143,19 @@ export function setField(t: Ticket, name: string, value: unknown): void {
   else rec[name] = value;
 }
 
-/** Equality for a single named field between two tickets (order-insensitive). */
+/**
+ * Equality for a single named field between two tickets (order-insensitive).
+ *
+ * A custom field whose key is absent equals one set to null: both mean "no value".
+ * Keys go missing for ordinary reasons — a field added to `customFields` after the
+ * ticket was fetched, or one Jira does not return for the issue — and a missing key
+ * must never read as an edit, let alone compile to a write that clears the field.
+ */
 export function fieldEqual(a: Ticket, b: Ticket, name: string): boolean {
   const na = normalizeTicket(a);
   const nb = normalizeTicket(b);
+  if (name.startsWith("fields.")) {
+    return deepEqual(getField(na, name) ?? null, getField(nb, name) ?? null);
+  }
   return deepEqual(getField(na, name), getField(nb, name));
 }

@@ -466,6 +466,46 @@ export class Store {
     return path;
   }
 
+  /** This proposal's latest push from the journal, or null when it has never pushed. */
+  lastPush(): JournalEntry | null {
+    // Filenames start with the push's start time, so they sort chronologically; only
+    // the newest of this proposal's needs reading.
+    const suffix = this.proposal === DEFAULT_PROPOSAL
+      ? "-push.json"
+      : `-push-${this.proposal}.json`;
+    let names: string[];
+    try {
+      names = [...Deno.readDirSync(this.journalDir)]
+        .filter((e) => e.isFile && e.name.endsWith(suffix))
+        .map((e) => e.name)
+        .sort()
+        .reverse();
+    } catch {
+      return null;
+    }
+    for (const name of names) {
+      const entry = JSON.parse(Deno.readTextFileSync(join(this.journalDir, name))) as JournalEntry;
+      if ((entry.proposal ?? DEFAULT_PROPOSAL) === this.proposal) return entry;
+    }
+    return null;
+  }
+
+  /**
+   * What this proposal's last push left staged when it stopped at a failure: the ids
+   * it was sending that are still committed. A human approved these once already, so
+   * they are leftovers to retry or drop, not new work — and are labelled as such.
+   */
+  leftovers(): { pushedAt: string; ids: string[] } | null {
+    const last = this.lastPush();
+    if (last?.result !== "partial") return null;
+    const staged = new Set([
+      ...this.listCommittedIds(),
+      ...this.readIntents().filter((i) => i.committed).map((i) => i.key),
+    ]);
+    const ids = (last.changes ?? []).map((c) => c.key ?? c.id).filter((id) => staged.has(id));
+    return ids.length > 0 ? { pushedAt: last.startedAt, ids } : null;
+  }
+
   listJournal(): { path: string; entry: JournalEntry }[] {
     try {
       return [...Deno.readDirSync(this.journalDir)]
@@ -500,6 +540,15 @@ export class Store {
 
     const ids = new Set<string>([...working.keys(), ...baseKeys, ...held.keys()]);
 
+    const leftovers = new Map<string, ReturnType<Store["leftovers"]>>();
+    const leftoverNote = (s: Store, id: string): { detail?: string } => {
+      if (!leftovers.has(s.proposal)) leftovers.set(s.proposal, s.leftovers());
+      const left = leftovers.get(s.proposal);
+      if (!left?.ids.includes(id)) return {};
+      const day = left.pushedAt.slice(0, 10);
+      return { detail: `left over from the partial push on ${day} — jt log ${id}` };
+    };
+
     const out: TicketStatus[] = [];
     for (const id of [...ids].sort(compareTicketIds)) {
       const h = held.get(id);
@@ -526,6 +575,7 @@ export class Store {
           id,
           state: intentState(intent.mode, intent.committed),
           summary: intent.summary,
+          ...(intent.committed ? leftoverNote(h!.store, id) : {}),
           ...proposal,
         });
         continue;
@@ -550,6 +600,7 @@ export class Store {
             id,
             state: ticketsEqual(w.ticket, c.ticket) ? "new+committed" : "new+committed+modified",
             summary,
+            ...leftoverNote(h!.store, id),
             ...proposal,
           });
         } else {
@@ -563,6 +614,7 @@ export class Store {
           id,
           state: ticketsEqual(w.ticket, c.ticket) ? "committed" : "committed+modified",
           summary,
+          ...leftoverNote(h!.store, id),
           ...proposal,
         });
       } else {

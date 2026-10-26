@@ -98,9 +98,14 @@ export function issueToBaseEntry(issue: any, meta: Meta, config: Config): BaseEn
     body: adfToMd(c.body).md,
   }));
 
+  // Jira leaves a field out of the issue when the issue does not have it (no field
+  // context for its project and type, or hidden by the field configuration), and
+  // sends null when it is merely empty. Keep that difference: a key in `fields` is a
+  // field this ticket has.
   const fields: Record<string, unknown> = {};
   for (const alias of config.customFields) {
     const fm = resolveFieldAlias(meta, alias);
+    if (!(fm.id in f)) continue;
     fields[alias] = canonicalizeCustomValue(fm, f[fm.id]);
   }
 
@@ -244,11 +249,7 @@ export function integrateFetched(anyStore: Store, fresh: BaseEntry): IntegrateRe
 
   // Rebase: remote-changed fields flow in where not locally edited; comments merge.
   const rebase = (t: Ticket): Ticket => {
-    const out = structuredClone(t);
-    for (const n of remoteChanged) {
-      const locallyEdited = !fieldEqual(old.ticket, t, n);
-      if (!locallyEdited) setField(out, n, getField(fresh.ticket, n));
-    }
+    const out = rebaseFields(t, old.ticket, fresh.ticket);
     out.comments = mergeComments(fresh.ticket.comments, t.comments);
     if (fresh.ticket.descriptionLossy) out.descriptionLossy = true;
     return out;
@@ -267,6 +268,22 @@ export function integrateFetched(anyStore: Store, fresh: BaseEntry): IntegrateRe
     else store.writeCommitted(key, serializeTicket(rebased));
   }
   return { kind: "rebased", fields: remoteChanged };
+}
+
+/**
+ * A copy of local ticket `t` moved from base `old` onto base `fresh`: a field that `t`
+ * — and every ticket in `also`, the other local layers — left as it was in `old` takes
+ * its `fresh` value; local edits stay. Comments are the caller's to merge.
+ */
+export function rebaseFields(t: Ticket, old: Ticket, fresh: Ticket, also: Ticket[] = []): Ticket {
+  const out = structuredClone(t);
+  for (const n of ticketFieldNames(old, fresh, t, ...also)) {
+    if (n === "comments" || fieldEqual(old, fresh, n)) continue;
+    if ([t, ...also].every((l) => fieldEqual(old, l, n))) {
+      setField(out, n, structuredClone(getField(fresh, n)));
+    }
+  }
+  return out;
 }
 
 function hasLocalNewComments(

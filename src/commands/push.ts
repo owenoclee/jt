@@ -1,10 +1,12 @@
 /**
- * jt push: the single remote-mutating verb.
+ * jt push: submit a proposal for review.
  *
  * Compiles one proposal's committed−base into exact API ops (never reading the working
- * tree), checks remote staleness, then hands the changeset to a detached review server
- * (see src/commands/push_detach.ts) and prints its URL immediately; a human decision on
- * that page executes it and `jt await` reports the outcome.
+ * tree) and checks remote staleness, so anything wrong with it is said here and now.
+ * Then it records the proposal as submitted, makes sure the review server is running
+ * (src/commands/serve.ts), and prints the proposal's link. Nothing is sent: the human
+ * approves on that page whenever they get to it, and the server sends it then
+ * (src/review/hub.ts). The author does not wait.
  *
  * The one path with no page: a changeset made ENTIRELY of changes the user's own
  * settings auto-allow (src/settings.ts, src/autoallow.ts) is sent here, at once. That
@@ -24,7 +26,7 @@ import {
   ticketFieldNames,
   ticketsEqual,
 } from "../canonical.ts";
-import { pruneChain } from "../chain.ts";
+import { pruneChain, readChain } from "../chain.ts";
 import { compilePush, type CompiledPush } from "../compile.ts";
 import { localContext, withClient, withMeta } from "../context.ts";
 import { fail } from "../errors.ts";
@@ -32,14 +34,15 @@ import { intentFailure } from "../intents.ts";
 import { JiraApiError, type JiraClient } from "../jira/client.ts";
 import { searchPage } from "../jira/search.ts";
 import { bold, cyan, dim, green, red, yellow } from "../render/colors.ts";
-import { clearPending, pidAlive, readPending, readResult, writeSpec } from "../review/handoff.ts";
-import { openerCommand, pushHandoffNotice } from "../review/nudge.ts";
+import { proposalView } from "../review/meta.ts";
+import { submittedNotice } from "../review/nudge.ts";
 import { buildTicketPlans, describeChanges } from "../review/plan.ts";
+import { registerWorkspace } from "../review/registry.ts";
 import { DEFAULT_PROPOSAL, leftoverAdvice, proposalFlag } from "../proposal.ts";
 import { loadSettings, settingsPath } from "../settings.ts";
 import type { Store } from "../store.ts";
 import { fetchBaseEntry, integrateFetched, rebaseFields } from "../sync.ts";
-import { spawnReviewServer } from "./push_detach.ts";
+import { ensureServer, proposalUrl } from "./serve.ts";
 import type {
   BaseEntry,
   CommentEntry,
@@ -48,33 +51,33 @@ import type {
   JournalOpResult,
   LinkEntry,
   Meta,
+  ProposalMeta,
   Ticket,
 } from "../types.ts";
 
 export type PushContext = ReturnType<typeof localContext> & { meta: Meta; client: JiraClient };
 
 export async function cmdPush(argv: string[]): Promise<void> {
-  const args = parseArgs(argv, { boolean: ["dry-run", "full"] });
+  const args = parseArgs(argv, {
+    boolean: ["dry-run", "full"],
+    string: ["title", "description", "description-file"],
+  });
   const ctx = withClient(withMeta(localContext()));
   const { store } = ctx;
-  const dir = store.proposalDir;
   const flag = proposalFlag(store.proposal);
+  const view = proposalView(store);
 
-  // One review at a time PER PROPOSAL, and outcomes are collected exactly once: refuse
-  // while this proposal's page is live, and refuse to bury an uncollected outcome (its
-  // notes may matter). Other proposals' reviews are none of this one's business.
-  const pending = readPending(dir);
-  if (pending && pidAlive(pending.pid)) {
+  if (view.status === "legacy-review") {
     fail(
-      `a review is already pending: ${pending.url}\n` +
-        `  hand it to the user (${openerCommand(pending.url)}), then run jt await${flag} to collect\n` +
-        `  their decision — or jt cancel${flag} to withdraw it`,
+      `a review started by an older jt is still open for this proposal` +
+        (view.legacyUrl ? `: ${view.legacyUrl}` : "") +
+        `\n  jt await${flag} collects its outcome; jt cancel${flag} withdraws it. Then push again.`,
     );
   }
-  if (pending) clearPending(dir); // stale: the server died without recording anything
-  if (readResult(dir)) {
+  if (view.status === "pushing") {
     fail(
-      `the previous push finished but its outcome was never collected — run jt await${flag} first`,
+      `the user approved this proposal and it is being sent to Jira right now — ` +
+        `jt await${flag} reports the outcome`,
     );
   }
 
@@ -95,7 +98,7 @@ export async function cmdPush(argv: string[]): Promise<void> {
     if (auto.length) console.log(`\n${dim(`auto-allowed by your settings: ${auto.join(", ")}`)}`);
     console.log(
       `\n${cyan("dry-run")} — nothing sent` +
-        (verdict.allAuto ? dim(" (jt push would send this without a review page)") : ""),
+        (verdict.allAuto ? dim(" (jt push would send this without a review)") : ""),
     );
     return;
   }
@@ -106,15 +109,72 @@ export async function cmdPush(argv: string[]): Promise<void> {
     return;
   }
 
-  writeSpec(dir, {
-    ops: compiled.ops,
-    warnings: compiled.warnings,
-    existingKeys: compiled.existingKeys,
-    verdict,
+  const { title, description } = describeProposal(store, view.meta, args);
+  // Comments from a review that asked for changes stay with the proposal, so the
+  // reviewer can see them beside the changes that answer them.
+  const previous = view.meta?.review ?? view.meta?.previousReview;
+  store.writeMeta({
+    title,
+    description,
+    submittedAt: new Date().toISOString(),
+    ...(previous ? { previousReview: previous } : {}),
   });
-  const url = await spawnReviewServer(ctx.ws.root, store);
-  console.log(`${bold("review page:")} ${url}`);
-  console.log(pushHandoffNotice(url, store.proposal));
+  const slug = registerWorkspace(ctx.ws.root, ctx.ws.config.project);
+  let origin: string;
+  try {
+    origin = await ensureServer();
+  } catch (e) {
+    fail(
+      `the proposal is submitted, but its page is not being served: ${
+        e instanceof Error ? e.message : e
+      }\n  Nothing is lost: it is waiting for review, and its link works once the server ` +
+        `runs.\n  user: jt review starts the server and prints where the proposals are.`,
+    );
+  }
+  const again = view.meta?.submittedAt || view.meta?.review ? "resubmitted" : "submitted";
+  console.log(`${bold(`proposal ${again} for review:`)} ${proposalUrl(origin, slug, store.proposal)}`);
+  console.log(submittedNotice(store.proposal));
+}
+
+/**
+ * The title and description a proposal goes to review under. What the author gives
+ * now wins; a resubmission keeps what it had. A named proposal must be titled — its
+ * reviewer meets it in a list, days later, with no session to ask.
+ */
+function describeProposal(
+  store: Store,
+  meta: ProposalMeta | null,
+  args: { title?: string; description?: string; "description-file"?: string },
+): { title: string; description: string } {
+  const flag = proposalFlag(store.proposal);
+  if (args.description !== undefined && args["description-file"] !== undefined) {
+    fail("give --description or --description-file, not both");
+  }
+  let description = meta?.description ?? "";
+  if (args["description-file"] !== undefined) {
+    try {
+      description = Deno.readTextFileSync(args["description-file"]);
+    } catch (e) {
+      fail(`cannot read --description-file ${args["description-file"]}: ${e instanceof Error ? e.message : e}`);
+    }
+  } else if (args.description !== undefined) {
+    description = args.description;
+  }
+  // The default proposal is the single-agent, single-changeset case: its last commit
+  // note already says what it is.
+  const fallback = store.proposal === DEFAULT_PROPOSAL
+    ? readChain(store).entries.findLast((e) => e.author === "agent")?.note
+    : undefined;
+  const title = (args.title ?? meta?.title ?? fallback ?? "").replace(/\s+/g, " ").trim();
+  if (!title) {
+    fail(
+      `a proposal needs a title for its reviewer, who reads it later without you there:\n` +
+        `  jt push${flag} --title "what this proposal does" ` +
+        `[--description "why, in markdown" | --description-file FILE]`,
+    );
+  }
+  if (title.length > 200) fail(`the title is ${title.length} characters — keep it to one line (200 at most)`);
+  return { title, description: description.trim() };
 }
 
 /**
@@ -131,7 +191,13 @@ async function pushAutoAllowed(
     `${bold("auto-allowed")} by your settings (${settingsPath()}): ${verdict.rules.join(", ")}`,
   );
   console.log(dim("no review needed — sending now\n"));
-  const result = await executePush(ctx, compiled.ops, { verdict, autoApproved: true });
+  const title = ctx.store.readMeta()?.title;
+  const result = await executePush(ctx, compiled.ops, { verdict, autoApproved: true, title });
+  // Sent, so no longer anyone's to review — whatever its review state was.
+  const meta = ctx.store.readMeta();
+  if (meta) {
+    ctx.store.writeMeta(result.failure ? { title: meta.title, description: meta.description } : null);
+  }
   ctx.store.dropIfDrained();
   console.log("");
   console.log(dim(`journal: ${result.journalPath}`));
@@ -184,7 +250,7 @@ export async function checkStaleness(ctx: PushContext, existingKeys: string[]): 
  * whole `key in (...)` query if any key no longer exists, so a 400 falls back to
  * per-key GETs (bounded concurrency), where a 404 means the same thing: gone.
  */
-async function remoteUpdated(ctx: PushContext, keys: string[]): Promise<Map<string, string>> {
+export async function remoteUpdated(ctx: PushContext, keys: string[]): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   try {
     let token: string | undefined;
@@ -206,7 +272,7 @@ async function remoteUpdated(ctx: PushContext, keys: string[]): Promise<Map<stri
         const res = (await ctx.client.get(`/rest/api/3/issue/${key}`, { fields: "updated" })) as any;
         if (res.fields?.updated) out.set(key, res.fields.updated);
       } catch (e) {
-        if (e instanceof JiraApiError && e.status === 404) return;
+        if (e instanceof JiraApiError && e.status === 404 && !e.authRejected) return;
         throw e;
       }
     }));
@@ -275,13 +341,23 @@ export interface PushApproval {
   verdict?: AutoVerdict;
   /** No human decided: the whole changeset was auto-allowed. */
   autoApproved?: boolean;
+  /** The proposal's title, journaled so a pushed proposal can still be named. */
+  title?: string;
 }
+
+/**
+ * Where a push reports its progress. A command prints to the terminal; the review
+ * server, which runs pushes for several proposals in one process, collects the lines
+ * for the page and the proposal's log instead.
+ */
+export type Print = (line: string) => void;
 
 /** Execute ops in order, settle all local layers against reality, journal, prune chain. */
 export async function executePush(
   ctx: PushContext,
   ops: CompiledOp[],
   approval: PushApproval = {},
+  print: Print = (line) => console.log(line),
 ): Promise<PushResult> {
   const { store, client } = ctx;
   const { review, verdict } = approval;
@@ -289,6 +365,7 @@ export async function executePush(
     startedAt: new Date().toISOString(),
     result: "success",
     ...(store.proposal === DEFAULT_PROPOSAL ? {} : { proposal: store.proposal }),
+    ...(approval.title ? { title: approval.title } : {}),
     ...(review ? { review } : {}),
     ...(approval.autoApproved
       ? { autoApproved: { settings: settingsPath(), rules: verdict?.rules ?? [] } }
@@ -349,11 +426,11 @@ export async function executePush(
         if (!key) throw new Error("create returned no issue key");
         refMap.set(op.refId!, key);
         journal.created![op.refId!] = key;
-        console.log(`  ${green("✓")} ${resolved.label} ${bold(`→ ${key}`)}`);
+        print(`  ${green("✓")} ${resolved.label} ${bold(`→ ${key}`)}`);
       } else if (alreadyGone) {
-        console.log(`  ${green("✓")} ${resolved.label} ${dim("(already gone from Jira)")}`);
+        print(`  ${green("✓")} ${resolved.label} ${dim("(already gone from Jira)")}`);
       } else {
-        console.log(`  ${green("✓")} ${resolved.label}`);
+        print(`  ${green("✓")} ${resolved.label}`);
       }
       outcome(op.issue).ok++;
       if (op.kind === "comment" && op.commentBody !== undefined) {
@@ -364,7 +441,7 @@ export async function executePush(
       rec.ok = false;
       rec.error = msg;
       if (e instanceof JiraApiError) rec.status = e.status;
-      console.log(`  ${red("✗")} ${resolved.label}\n    ${red(msg)}`);
+      print(`  ${red("✗")} ${resolved.label}\n    ${red(msg)}`);
       outcome(op.issue).failed++;
       failure = msg;
       break;
@@ -407,7 +484,7 @@ export async function executePush(
         store.writeSeen(intent.key, fresh.ticket);
         store.writeWorking(intent.key, fresh.ticket);
       } else {
-        console.log(yellow(`  warning: could not fetch ${intent.key} after unarchiving — jt pull`));
+        print(yellow(`  warning: could not fetch ${intent.key} after unarchiving — jt pull`));
       }
       continue;
     }
@@ -532,7 +609,7 @@ export async function executePush(
     const posted = postedComments.get(key) ?? [];
     const fresh = await tryFetch(ctx, key);
     if (!fresh) {
-      console.log(yellow(`  warning: could not refetch ${key} — run jt pull`));
+      print(yellow(`  warning: could not refetch ${key} — run jt pull`));
       continue;
     }
     store.writeBase(fresh);

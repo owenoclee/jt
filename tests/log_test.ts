@@ -6,7 +6,7 @@ import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/a
 import { cmdCommit } from "../src/commands/commit.ts";
 import { cmdLog, parseSince } from "../src/commands/log.ts";
 import { cmdPush } from "../src/commands/push.ts";
-import { cmdAwait } from "../src/commands/push_detach.ts";
+import { cmdAwait } from "../src/commands/review.ts";
 import { UserError } from "../src/errors.ts";
 import { renderJournalEntry } from "../src/render/render.ts";
 import type { JournalEntry } from "../src/types.ts";

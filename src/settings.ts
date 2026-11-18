@@ -29,6 +29,8 @@ export interface Settings {
   autoAllow: AutoAllowRule[];
   /** False disables the once-a-day check for a newer jt release. */
   updateCheck: boolean;
+  /** The loopback port the review server listens on; null = jt's default. */
+  reviewPort: number | null;
 }
 
 export const settingsPath = (): string => join(configHome(), "jt", "settings.json");
@@ -81,6 +83,7 @@ const RuleSchema = z.union([
 const SettingsSchema = z.strictObject({
   autoAllow: z.array(RuleSchema).optional(),
   updateCheck: z.boolean().optional(),
+  reviewPort: z.number().int().min(1024).max(65535).optional(),
 });
 
 export function parseSettings(data: unknown, source: string): Settings {
@@ -106,7 +109,11 @@ export function parseSettings(data: unknown, source: string): Settings {
       fail(`invalid settings ${source}:\n  - autoAllow.${i}: ${e instanceof Error ? e.message : e}`);
     }
   }
-  return { autoAllow, updateCheck: result.data.updateCheck ?? true };
+  return {
+    autoAllow,
+    updateCheck: result.data.updateCheck ?? true,
+    reviewPort: result.data.reviewPort ?? null,
+  };
 }
 
 export function loadSettings(): Settings {
@@ -115,7 +122,7 @@ export function loadSettings(): Settings {
   try {
     text = Deno.readTextFileSync(path);
   } catch {
-    return { autoAllow: [], updateCheck: true };
+    return { autoAllow: [], updateCheck: true, reviewPort: null };
   }
   let data: unknown;
   try {

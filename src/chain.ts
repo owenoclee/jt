@@ -9,6 +9,7 @@
  */
 import { join } from "@std/path";
 import { serializeTicket } from "./canonical.ts";
+import { writeFileAtomic } from "./fsutil.ts";
 import type { Store } from "./store.ts";
 import type { IntentMode, Ticket } from "./types.ts";
 
@@ -66,7 +67,7 @@ function writeChain(store: Store, chain: Chain): void {
     return;
   }
   Deno.mkdirSync(store.proposalDir, { recursive: true });
-  Deno.writeTextFileSync(chainPath(store), JSON.stringify(chain, null, 2) + "\n");
+  writeFileAtomic(chainPath(store), JSON.stringify(chain, null, 2) + "\n");
 }
 
 export function appendChainEntry(
@@ -177,7 +178,7 @@ export function readReviewMarker(store: Store): ReviewMarker | null {
 export function writeReviewMarker(store: Store, seq: number): void {
   const marker: ReviewMarker = { lastReviewedSeq: seq, decidedAt: new Date().toISOString() };
   Deno.mkdirSync(store.proposalDir, { recursive: true });
-  Deno.writeTextFileSync(markerPath(store), JSON.stringify(marker, null, 2) + "\n");
+  writeFileAtomic(markerPath(store), JSON.stringify(marker, null, 2) + "\n");
 }
 
 /** Snapshot helper: the committed state of `id` right now, as a ChainSnapshot. */

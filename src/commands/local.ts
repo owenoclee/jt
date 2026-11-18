@@ -4,13 +4,14 @@ import { basename, join } from "@std/path";
 import { ticketsEqual } from "../canonical.ts";
 import { pruneChain, withdrawFromChain } from "../chain.ts";
 import { renderPage, renderTicketCard, renderTicketDelta, type ReviewPageModel } from "../review/html.ts";
-import { buildCommitViews, buildSinceReview } from "../review/model.ts";
+import { buildCommitViews, buildCommittedTickets, buildSinceReview } from "../review/model.ts";
 import { localContext, withClient, withMeta } from "../context.ts";
 import { diffTickets } from "../diff.ts";
 import { fail } from "../errors.ts";
 import { COMMITTED_INTENT_STATES, intentNoun, STAGED_INTENT_STATES } from "../intents.ts";
 import { DEFAULT_PROPOSAL, explicitProposalFlag, proposalFlag } from "../proposal.ts";
 import { makeRefContext } from "../refs.ts";
+import { markRevised, presentStatus, proposalView, revisedNotice } from "../review/meta.ts";
 import { bold, cyan, dim, green, red, yellow } from "../render/colors.ts";
 import { upstreamChangeCount } from "./changes.ts";
 import { renderDiffEntries, renderStatus, renderTicket } from "../render/render.ts";
@@ -26,6 +27,16 @@ export function cmdStatus(argv: string[] = []): void {
   const upstream = upstreamChangeCount(store);
   if (upstream > 0) {
     console.log(yellow(`  ↓ ${upstream} upstream change${upstream === 1 ? "" : "s"} since your last ack — jt changes`));
+  }
+  // Reviews happen while nobody is waiting on them: say when one has left something
+  // for an agent to pick up.
+  const waiting = store.listProposals()
+    .map((name) => proposalView(store.scoped(name)))
+    .filter((v) => ["changes-requested", "blocked", "partly-pushed", "interrupted"].includes(v.status));
+  for (const v of waiting) {
+    console.log(
+      yellow(`  ! proposal '${v.name}': ${presentStatus(v.status).label} — jt proposals says what is needed`),
+    );
   }
 }
 
@@ -119,7 +130,9 @@ function diffWeb(
 ): void {
   const { store } = ctx;
   const refs = makeRefContext(store, ctx.ws.config);
-  const tickets: ReviewPageModel["tickets"] = [];
+  const tickets: ReviewPageModel["tickets"] = committedView
+    ? buildCommittedTickets(store, refs, wanted)
+    : [];
   const push = (
     id: string,
     summary: string,
@@ -134,24 +147,7 @@ function diffWeb(
     }
   };
 
-  if (committedView) {
-    for (const id of store.listCommittedIds()) {
-      if (!wanted(id)) continue;
-      const committed = store.readCommitted(id)!;
-      const base = id.startsWith("@") ? null : store.readBase(id);
-      push(
-        id,
-        committed.ticket.summary,
-        base ? "update" : "create",
-        base?.ticket ?? null,
-        committed.ticket,
-      );
-    }
-    for (const i of store.readIntents().filter((i) => i.committed)) {
-      if (!wanted(i.key)) continue;
-      push(i.key, i.summary, i.mode, store.readBase(i.key)?.ticket ?? null, null);
-    }
-  } else {
+  if (!committedView) {
     for (const s of store.status()) {
       if (!wanted(s.id)) continue;
       const working = store.readWorking(s.id);
@@ -357,7 +353,15 @@ export function cmdUncommit(argv: string[]): void {
     console.log(`uncommitted ${bold(id)} ${dim("(working edits kept — see jt status)")}`);
   }
   withdrawFromChain(store, "agent", `uncommit ${Object.keys(withdrawn).join(", ")}`, withdrawn);
+  if (Object.keys(withdrawn).length > 0) noteRevised(store);
   store.dropIfDrained();
+}
+
+/** A submitted proposal just changed: mark it, and say what that means for its review. */
+function noteRevised(store: Store): void {
+  if (markRevised(store)) {
+    console.log(yellow(revisedNotice(store.proposal, proposalFlag(store.proposal))));
+  }
 }
 
 /**
@@ -406,6 +410,7 @@ export function cmdRestore(argv: string[]): void {
       // An unarchive can be staged for a key that was never in the mirror; there is
       // then no base to put back, and dropping the intent is the whole restore.
       if (base) store.writeWorking(id, base.ticket);
+      if (intent.committed) noteRevised(store);
       store.dropIfDrained();
       console.log(
         `restored ${bold(id)} ${
@@ -469,11 +474,16 @@ function stageIntent(mode: IntentMode, argv: string[]): void {
   const summary = base?.ticket.summary ?? "";
   const intents = store.readIntents().filter((i) => i.key !== key);
   intents.push({ key, mode, summary, requestedAt: new Date().toISOString(), committed: false });
+  const wasStaged = store.committedExists(key) ||
+    store.readIntents().some((i) => i.key === key && i.committed);
   store.writeIntents(intents);
   if (mode !== "unarchive") {
     store.removeWorking(key);
     store.removeCommitted(key);
   }
+  // Replacing a staged change with an uncommitted intent takes it out of what the
+  // proposal would send — with no chain entry to show for it.
+  if (wasStaged) noteRevised(store);
   const named = summary ? `${bold(key)} "${summary}"` : bold(key);
   const colour = mode === "delete" ? red : yellow;
   console.log(`${colour(`staged ${intentNoun(mode)}`)} of ${named}`);
@@ -520,6 +530,7 @@ export function cmdUntrack(argv: string[]): void {
       withdrawFromChain(store, "agent", `untrack ${id}`, {
         [id]: committed?.ticket.summary ?? committedIntent!.summary,
       });
+      noteRevised(store);
     } else {
       pruneChain(store, [id]);
     }
@@ -544,6 +555,7 @@ export async function cmdResolve(argv: string[]): Promise<void> {
 
   const fresh = await fetchBaseEntry(ctx.client, ctx.meta, ctx.ws.config, key);
   ctx.store.writeBase(fresh);
+  if (ctx.store.committedExists(key)) noteRevised(ctx.store);
   ctx.store.removeCommitted(key);
   pruneChain(ctx.store, [key]);
   ctx.store.writeConflicts(ctx.store.readConflicts().filter((c) => c.key !== key));

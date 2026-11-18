@@ -5,7 +5,8 @@ import { cmdChanges } from "./commands/changes.ts";
 import { cmdFetch, cmdPull } from "./commands/fetch.ts";
 import { cmdCommit } from "./commands/commit.ts";
 import { cmdPush } from "./commands/push.ts";
-import { cmdAwait, cmdCancel, cmdPushServe } from "./commands/push_detach.ts";
+import { cmdAwait, cmdCancel } from "./commands/review.ts";
+import { cmdReview, cmdServe, reviveServerIfNeeded } from "./commands/serve.ts";
 import { cmdLog } from "./commands/log.ts";
 import { cmdProposals } from "./commands/proposals.ts";
 import {
@@ -22,8 +23,10 @@ import {
   cmdUncommit,
   cmdUntrack,
 } from "./commands/local.ts";
+import { findWorkspaceRoot } from "./config.ts";
 import { UserError } from "./errors.ts";
 import { JiraApiError } from "./jira/client.ts";
+import { withWorkspaceLock } from "./lock.ts";
 import { extractProposalFlag, setActiveProposal } from "./proposal.ts";
 import { bold, red } from "./render/colors.ts";
 import { skillSyncEnabled, syncInstalledSkills } from "./skillsync.ts";
@@ -81,41 +84,57 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
     jt untrack ID...        remove all local state; Jira untouched
     jt resolve KEY          accept working file as desired state after a pull conflict
 
-  proposals (parallel agents: one named changeset each — like branches)
+  proposals (one named changeset each, reviewed like a pull request)
     -p NAME | --proposal NAME | JT_PROPOSAL=NAME
                             a global flag for any command: commit, push, await, cancel,
                             uncommit, diff --committed... then act on proposal NAME only.
                             Each proposal has its own staged tickets, its own review
-                            page and its own outcome, so agents sharing a workspace
-                            never push, await or cancel each other's work. A ticket is
-                            held by one proposal at a time. With no name, commands use
-                            the default proposal. jt commit -p NAME takes explicit ids
-                            (with none: new edits to tickets NAME already holds)
+                            page at its own durable link, and its own outcome, so
+                            agents sharing a workspace never touch each other's work.
+                            A ticket is held by one proposal at a time. With no name,
+                            commands use the default proposal. jt commit -p NAME takes
+                            explicit ids (with none: new edits to tickets NAME holds)
+    jt proposals            every proposal: what is staged, where its review stands,
+                            the comments the user left when asking for changes, and
+                            what was approved and pushed lately. Start here when
+                            picking work back up
 
-  push (the only remote-mutating verb — ALWAYS two commands when a review is needed)
-    jt push                 compile committed−base → serve the changeset as a browser
-                            review page from a detached process; prints the URL and
-                            returns immediately. ONE human decision there: Approve &
-                            push (the WHOLE changeset, exactly as rendered) or Request
-                            changes (nothing sent; per-ticket notes returned). The page
-                            never expires. NOTHING is sent by push itself — open the
-                            URL for the user, then jt await.
+  push (submit for review — the user's approval is what sends it to Jira)
+    jt push [-p NAME] --title 'what it does' [--description MD | --description-file F]
+                            compile committed−base and check it against Jira, then
+                            submit the proposal for review and print its link. NOTHING
+                            is sent, and nothing more is owed: give the user the link
+                            and stop. They review it whenever they get to it — Approve
+                            & push sends the WHOLE changeset exactly as rendered, with
+                            no agent involved; Request changes sends nothing and leaves
+                            their comments on the proposal (jt proposals). Running push
+                            again resubmits: after addressing comments, or after any
+                            change to a submitted proposal. A named proposal needs a
+                            title; the description says why, for a reviewer reading it
+                            later without you.
                             Exception: if EVERY change is one the user auto-allowed in
                             ~/.config/jt/settings.json, push sends it at once and says
-                            so — no page, nothing to await. In a mixed changeset the
-                            auto-allowed changes are greyed out on the page and wait
-                            with the rest
+                            so — no review. In a mixed changeset the auto-allowed
+                            changes are greyed out on the page and wait with the rest
+    jt push --dry-run       print the compiled API ops and stop (nothing submitted or
+                            sent; ADF bodies elided — add --full for the raw JSON); says
+                            which changes the user's settings auto-allow
     jt await [--timeout SECS]
-                            block until the pending review settles, then report it —
-                            exactly once. exit 0 pushed · 2 changes requested (notes on
-                            stdout) · 1 stale/failed/cancelled. gives up harmlessly
-                            after SECS (default 600) — rerun to keep waiting. A push is
-                            unfinished until this returns
-    jt cancel               withdraw the pending review: stops the page, sends nothing;
-                            refused once the decision has landed
-    jt push --dry-run       print the compiled API ops and stop (nothing served or sent;
-                            ADF bodies elided — add --full for the raw JSON); says which
-                            changes the user's settings auto-allow
+                            optional — only when the user asks you to wait. Blocks until
+                            the proposal leaves review and reports what became of it;
+                            repeatable. exit 0 pushed · 2 changes requested (comments on
+                            stdout) · 1 otherwise, including still-in-review after SECS
+                            (default 600)
+    jt cancel               withdraw the proposal from review: nothing is sent, the
+                            staged work stays; refused once it has been approved
+
+  review server (for the user)
+    jt review               print where the proposals are (the inbox), starting the
+                            review server if it is not running
+    jt serve [--status | --stop]
+                            run the review server in the foreground. jt starts it by
+                            itself when a proposal is submitted; it serves every
+                            workspace on 127.0.0.1:5472 ("reviewPort" in settings.json)
 
   agents
     jt skill install <claude-code|codex>
@@ -128,7 +147,37 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
   there is one. It never updates itself. JT_NO_UPDATE_CHECK=1 turns the check off.
 `;
 
+/**
+ * Commands that rewrite the tool-owned layers. Each holds the workspace lock while it
+ * runs, so it never interleaves with another agent's command or with the review server
+ * settling an approved push. Reads, and anything that waits on a human, stay outside.
+ */
+const LOCKED_COMMANDS = new Set([
+  "fetch",
+  "pull",
+  "new",
+  "commit",
+  "uncommit",
+  "restore",
+  "rm",
+  "archive",
+  "unarchive",
+  "untrack",
+  "resolve",
+  "push",
+  "cancel",
+  "proposals",
+]);
+
 async function main(argv: string[]): Promise<void> {
+  const root = argv[0] !== undefined && LOCKED_COMMANDS.has(argv[0])
+    ? findWorkspaceRoot(Deno.cwd())
+    : null;
+  if (root) return await withWorkspaceLock(root, () => dispatch(argv));
+  return await dispatch(argv);
+}
+
+async function dispatch(argv: string[]): Promise<void> {
   const [cmd, ...rest] = argv;
   switch (cmd) {
     case "init":
@@ -174,8 +223,10 @@ async function main(argv: string[]): Promise<void> {
       return await cmdAwait(rest);
     case "cancel":
       return await cmdCancel();
-    case "_push-serve":
-      return await cmdPushServe();
+    case "serve":
+      return await cmdServe(rest);
+    case "review":
+      return await cmdReview();
     case "log":
       return cmdLog(rest);
     case "proposals":
@@ -209,6 +260,11 @@ if (import.meta.main) {
     // command, and an error (or jt await's own exit) would skip anything printed later.
     if (skillSyncEnabled(rest[0])) await syncInstalledSkills();
     await main(rest);
+    // Links already handed out must keep working: bring the review server back if a
+    // reboot took it away. push and review make sure of it themselves.
+    if (!["serve", "review", "push", undefined].includes(rest[0]) && skillSyncEnabled(rest[0])) {
+      reviveServerIfNeeded();
+    }
     await advise?.();
   } catch (e) {
     if (e instanceof UserError || e instanceof JiraApiError) {

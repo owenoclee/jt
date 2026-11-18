@@ -8,7 +8,7 @@ import { cmdCommit } from "../src/commands/commit.ts";
 import { cmdArchive, cmdRestore, cmdStatus, cmdUncommit } from "../src/commands/local.ts";
 import { cmdProposals } from "../src/commands/proposals.ts";
 import { cmdPush } from "../src/commands/push.ts";
-import { cmdAwait, cmdCancel } from "../src/commands/push_detach.ts";
+import { cmdAwait, cmdCancel } from "../src/commands/review.ts";
 import { UserError } from "../src/errors.ts";
 import {
   activeProposal,
@@ -17,7 +17,7 @@ import {
   setActiveProposal,
   validateProposalName,
 } from "../src/proposal.ts";
-import { readPending } from "../src/review/handoff.ts";
+import { proposalView } from "../src/review/meta.ts";
 import { Store } from "../src/store.ts";
 import { makeBaseEntry, makeTicket, tempStore } from "./helpers.ts";
 import { errorOf, withWorkspace } from "./workspace.ts";
@@ -143,48 +143,83 @@ Deno.test({
         assertStringIncludes(listing, "jt push -p b");
       });
 
-      await t.step("both reviews are live at once, each on its own page", async () => {
+      await t.step("both proposals are in review at once, each at its own link", async () => {
+        // A named proposal is not submitted without a title for its reviewer.
+        assertStringIncludes(await errorOf(() => ws.as("a", () => cmdPush([]))), "needs a title");
+        assertEquals(proposalView(ws.store("a")).status, "draft", "a refused push submits nothing");
+
         ws.logs.length = 0;
-        await ws.as("a", () => cmdPush([]));
-        await ws.as("b", () => cmdPush([]));
+        await ws.as("a", () => cmdPush(["--title", "Agent a's rename"]));
+        await ws.as("b", () =>
+          cmdPush(["--title", "Agent b's rename", "--description", "Because **b** said so."]));
         const out = ws.logs.join("\n");
-        assertStringIncludes(out, "jt await -p a"); // the handoff names its proposal
-        assertStringIncludes(out, "jt await -p b");
+        assertStringIncludes(out, "proposal submitted for review: http://127.0.0.1:5472/p/TST/a");
+        assertStringIncludes(out, "http://127.0.0.1:5472/p/TST/b");
+        assertStringIncludes(out, "SUBMITTED — nothing has been sent to Jira");
+        assertStringIncludes(out, "jt await -p a"); // the notice names its proposal
         const pageA = await ws.page("a");
         const pageB = await ws.page("b");
-        assertStringIncludes(pageA, "proposal a");
+        assertStringIncludes(pageA, "Agent a's rename");
+        assertStringIncludes(pageA, "proposal <b>a</b>");
         assertStringIncludes(pageA, "First (agent a)");
         assert(!pageA.includes("Second (agent b)"), "a's page must not carry b's ticket");
         assertStringIncludes(pageB, "Second (agent b)");
-        assertEquals(readPending(ws.store().proposalDir), null, "the default proposal has no review");
+        assertStringIncludes(pageB, "Because <strong>b</strong> said so.");
+        assertEquals(proposalView(ws.store()).status, "empty", "the default proposal has no review");
+        assertEquals(ws.mock.issues.get("TST-1")!.summary, "First", "submitting sends nothing");
 
-        // An agent that forgot its -p is pointed at the reviews that do exist.
+        // An agent that forgot its -p is pointed at the proposals that do exist.
         const msg = await errorOf(() => cmdAwait([]));
         assertStringIncludes(msg, "nothing to await");
         assertStringIncludes(msg, "jt await -p a");
-        assertStringIncludes(await errorOf(() => ws.as("a", () => cmdPush([]))), "already pending");
+
+        // Submitting again is harmless: the same link, the same title.
+        ws.logs.length = 0;
+        await ws.as("a", () => cmdPush([]));
+        assertStringIncludes(ws.logs.join("\n"), "proposal resubmitted for review: http://127.0.0.1:5472/p/TST/a");
+        assertEquals(ws.store("a").readMeta()!.title, "Agent a's rename");
+
+        ws.logs.length = 0;
+        cmdProposals();
+        const listing = ws.logs.join("\n");
+        assertStringIncludes(listing, "in review: http://127.0.0.1:5472/p/TST/a");
+        assertStringIncludes(listing, `"Agent b's rename"`);
       });
 
-      await t.step("approving one sends only that one; cancelling the other sends nothing", async () => {
+      await t.step("approving one sends only that one; withdrawing the other sends nothing", async () => {
         await ws.decide("a", "approve");
-        await ws.as("a", () => cmdAwait([]));
+        // Nobody has to collect it: the outcome is there for whoever asks, as often as they ask.
+        for (let i = 0; i < 2; i++) {
+          ws.logs.length = 0;
+          await ws.as("a", () => cmdAwait([]));
+          assertStringIncludes(ws.logs.join("\n"), "approved and pushed");
+          assertStringIncludes(ws.logs.join("\n"), "Agent a's rename");
+        }
         assertEquals(ws.mock.issues.get("TST-1")!.summary, "First (agent a)");
         assertEquals(ws.mock.issues.get("TST-2")!.summary, "Second", "b is still under review");
-        assert(readPending(ws.store("b").proposalDir), "b's review survives a's push");
+        assertEquals(proposalView(ws.store("b")).status, "in-review", "b's review survives a's push");
         assertEquals(ws.store().listProposals(), ["default", "b"], "a drained and was removed");
 
-        await ws.as("b", () => cmdCancel());
-        assertEquals(ws.mock.issues.get("TST-2")!.summary, "Second");
-        assertEquals(ws.store("b").listCommittedIds(), ["TST-2"], "cancel keeps the commit");
+        ws.logs.length = 0;
+        cmdProposals();
+        const listing = ws.logs.join("\n");
+        assertStringIncludes(listing, "approved and pushed in the last week");
+        assertStringIncludes(listing, `"Agent a's rename"`);
 
-        await ws.as("b", () => cmdPush([]));
+        await ws.as("b", () => cmdCancel());
+        assertEquals(proposalView(ws.store("b")).status, "draft");
+        assertEquals(ws.mock.issues.get("TST-2")!.summary, "Second");
+        assertEquals(ws.store("b").listCommittedIds(), ["TST-2"], "withdrawing keeps the commit");
+        assertStringIncludes(await errorOf(() => ws.as("b", () => cmdCancel())), "nothing to cancel");
+
+        await ws.as("b", () => cmdPush([])); // it keeps the title it was withdrawn with
         await ws.decide("b", "approve");
         await ws.as("b", () => cmdAwait([]));
         assertEquals(ws.mock.issues.get("TST-2")!.summary, "Second (agent b)");
         assertEquals(ws.store().listProposals(), ["default"]);
 
-        const journal = ws.store().listJournal().map((j) => j.entry.proposal).sort();
-        assertEquals(journal, ["a", "b"], "each push is journaled under its proposal");
+        const journal = ws.store().listJournal().map((j) => `${j.entry.proposal}: ${j.entry.title}`).sort();
+        assertEquals(journal, ["a: Agent a's rename", "b: Agent b's rename"]);
       });
     });
   },

@@ -9,9 +9,9 @@ import { cmdCommit } from "../src/commands/commit.ts";
 import { cmdConfigShow } from "../src/commands/init.ts";
 import { cmdArchive, cmdRm } from "../src/commands/local.ts";
 import { cmdPush } from "../src/commands/push.ts";
-import { cmdAwait } from "../src/commands/push_detach.ts";
+import { cmdAwait } from "../src/commands/review.ts";
 import { UserError } from "../src/errors.ts";
-import { readPending } from "../src/review/handoff.ts";
+import { proposalView } from "../src/review/meta.ts";
 import { buildTicketPlans } from "../src/review/plan.ts";
 import { parseSettings } from "../src/settings.ts";
 import type { CompiledOp, Ticket } from "../src/types.ts";
@@ -34,7 +34,8 @@ Deno.test("settings: rules are validated, normalized, and never include deletion
   assertThrows(() => rules(["delete"]), UserError, "can never be auto-allowed");
   assertThrows(() => rules([{ action: "assignee", to: ["x"] }]), UserError, "only applies to the status");
   assertThrows(() => parseSettings({ autoAlow: [] }, "settings.json"), UserError, "invalid settings");
-  assertEquals(parseSettings({}, "settings.json"), { autoAllow: [], updateCheck: true });
+  assertEquals(parseSettings({}, "settings.json"), { autoAllow: [], updateCheck: true, reviewPort: null });
+  assertEquals(parseSettings({ reviewPort: 6001 }, "settings.json").reviewPort, 6001);
 });
 
 /** A store holding one existing ticket with `edit` committed on top of it. */
@@ -100,7 +101,7 @@ Deno.test({
         edit("TST-1", { status: "In Progress" });
         cmdCommit([]);
         await cmdPush([]);
-        assert(readPending(store.proposalDir), "a status change needs review until the user says otherwise");
+        assertEquals(proposalView(store).status, "in-review", "a status change needs review until the user says otherwise");
         await ws.decide(null, "request-changes");
         await errorOfExit(() => cmdAwait([]));
         assertEquals(ws.mock.issues.get("TST-1")!.status, "To Do");
@@ -116,12 +117,15 @@ Deno.test({
         assertStringIncludes(out, "auto-allowed");
         assertStringIncludes(out, "status, comment");
         assertStringIncludes(out, "nothing to await");
-        assert(!out.includes("review page:"), "no review page for a fully auto-allowed push");
-        assertEquals(readPending(store.proposalDir), null);
+        assert(!out.includes("for review"), "nothing is submitted for review when all of it is auto-allowed");
+        assertEquals(store.readMeta(), null, "sent, so the earlier review's comments have nothing left to wait for");
         assertEquals(ws.mock.issues.get("TST-1")!.status, "In Progress");
         assertEquals(ws.mock.issues.get("TST-1")!.comments.length, 1);
         assertEquals(store.listCommittedIds(), [], "the changeset drained");
-        assertStringIncludes(await errorOf(() => cmdAwait([])), "nothing to await");
+        // Asked anyway, jt await says what happened — and that nobody reviewed it.
+        ws.logs.length = 0;
+        await cmdAwait([]);
+        assertStringIncludes(ws.logs.join("\n"), "sent without review under the user's settings");
 
         const entry = store.listJournal()[0].entry;
         assertEquals(entry.review, undefined, "nobody decided this one");
@@ -136,7 +140,7 @@ Deno.test({
         cmdCommit([]);
         ws.logs.length = 0;
         await cmdPush([]);
-        assertStringIncludes(ws.logs.join("\n"), "review page:");
+        assertStringIncludes(ws.logs.join("\n"), "proposal submitted for review:");
         assertEquals(ws.mock.issues.get("TST-2")!.status, "To Do", "nothing is sent ahead of the review");
 
         const html = await ws.page(null);
@@ -168,7 +172,7 @@ Deno.test({
         cmdRm(["TST-2"]);
         cmdCommit([]);
         await cmdPush([]);
-        assert(readPending(store.proposalDir), "a deletion always goes to review");
+        assertEquals(proposalView(store).status, "in-review", "a deletion always goes to review");
         assert(ws.mock.issues.has("TST-2"));
         await ws.decide(null, "request-changes");
         await errorOfExit(() => cmdAwait([]));
@@ -176,7 +180,7 @@ Deno.test({
         cmdArchive(["TST-2"]); // replaces the deletion intent
         cmdCommit([]);
         await cmdPush([]);
-        assertEquals(readPending(store.proposalDir), null);
+        assertEquals(proposalView(store).status, "empty");
         assert(ws.mock.issues.get("TST-2")!.archived, "archiving was auto-allowed");
       });
 

@@ -126,6 +126,49 @@ export interface IssueIntent {
   committed: boolean;
 }
 
+/**
+ * One review comment, as on a pull request: under a ticket's changes, or on the
+ * proposal as a whole.
+ */
+export interface ReviewComment {
+  /** The ticket the comment is on (key or "@name"); absent for a general comment. */
+  on?: string;
+  /** Plain text, as the reviewer typed it. */
+  body: string;
+}
+
+/** A review that asked for changes instead of approving: its comments. */
+export interface ProposalReview {
+  decidedAt: string;
+  comments: ReviewComment[];
+}
+
+/**
+ * A proposal's review state: proposal.json in its directory. Present from the first
+ * `jt push` until the proposal is pushed or emptied; a proposal that was never
+ * submitted has none. What the fields add up to is derived in src/review/meta.ts.
+ */
+export interface ProposalMeta {
+  title: string;
+  /** Markdown: what the proposal does and why, as its author put it. */
+  description: string;
+  /** Set while the proposal is submitted for review; removed when it is withdrawn,
+      sent back with requested changes, or pushed. */
+  submittedAt?: string;
+  /** The staged work changed after it was submitted. What is in review is no longer
+      what was submitted, so it cannot be approved until `jt push` submits it again. */
+  revised?: boolean;
+  /** Checking the proposal against Jira found something only an agent can fix. */
+  blocked?: { reason: string; at: string };
+  /** Changes were requested and no agent has resubmitted since: these comments wait. */
+  review?: ProposalReview;
+  /** The review before the current submission, kept so its comments can be shown
+      beside the changes that answer them. */
+  previousReview?: ProposalReview;
+  /** An approved push is executing in the review server with this pid. */
+  pushing?: { pid: number; since: string };
+}
+
 export interface ConflictRecord {
   key: string;
   fields: string[];
@@ -227,6 +270,8 @@ export interface JournalEntry {
   result: "success" | "partial" | "dry-run";
   /** The proposal that was pushed; absent for the default proposal and older entries. */
   proposal?: string;
+  /** The title the proposal was submitted under, when it had one. */
+  title?: string;
   /**
    * Approval provenance, recorded server-side at the decision POST. A push is either
    * decided on the review page (this) or sent unreviewed under the user's auto-allow

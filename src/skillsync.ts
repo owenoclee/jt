@@ -19,6 +19,7 @@
  */
 import { join } from "@std/path";
 import { configHome } from "./config.ts";
+import { writeFileAtomic } from "./fsutil.ts";
 import { dim, yellow } from "./render/colors.ts";
 import { SILENT_COMMANDS } from "./update.ts";
 import { VERSION } from "./version.ts";
@@ -47,6 +48,7 @@ export const SHIPPED_SKILLS: Readonly<Record<string, string>> = {
   "a01153f3a20c819fe2d962ff62fe0761b050e6c22f4a3a4083f69aa9db96ce56": "0.5.0",
   "a261cafe3d43ba097efac5aeafb27ece183ae837b84afad2dab4cea1b6ab95ef": "0.6.0-rc.1",
   "b3ca85bd394a2fcd4ebed945b6f73363a183a211cc26709a35e1ed58de22cc1d": "0.6.0-rc.4",
+  "0b9ecfb7745d63c99abbcd7ea23202031fc66328e89474f6527f4bb783444028": "0.7.0-rc.1",
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -114,22 +116,6 @@ function readCache(path: string): WarnCache {
   }
 }
 
-/** Replace via rename so an agent loading the skill never sees a half-written file. */
-function replaceFile(path: string, text: string): void {
-  const tmp = `${path}.jt-${Deno.pid}.tmp`;
-  Deno.writeTextFileSync(tmp, text);
-  try {
-    Deno.renameSync(tmp, path);
-  } catch (e) {
-    try {
-      Deno.removeSync(tmp);
-    } catch {
-      // nothing left to clean up
-    }
-    throw e;
-  }
-}
-
 /** Refresh stale, untouched skill copies and warn about edited ones. Never throws. */
 export async function syncInstalledSkills(opts: SkillSyncOptions = {}): Promise<void> {
   try {
@@ -158,7 +144,7 @@ export async function syncInstalledSkills(opts: SkillSyncOptions = {}): Promise<
       const from = shipped[hash];
       if (from !== undefined) {
         try {
-          replaceFile(path, embedded);
+          writeFileAtomic(path, embedded);
           print(refreshedNotice(tildePath(path, home), from, version));
         } catch {
           // unwritable: try again next command

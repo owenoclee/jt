@@ -13,6 +13,12 @@ export interface HistoryPageModel {
   /** What the page covers, in words: "today", "since 3d", "latest 10 of 42 pushes". */
   scope: string;
   refs: RefContext;
+  /** Set when the review server serves the page: the nonce in its CSP. */
+  cspNonce?: string;
+  /** Replaces the "jt history — scope" heading (a pushed proposal's own page). */
+  heading?: string;
+  /** A link back, shown above the heading. */
+  back?: { href: string; label: string };
 }
 
 const pad = (n: number) => String(n).padStart(2, "0");
@@ -79,6 +85,7 @@ function pushHtml(e: JournalEntry, m: HistoryPageModel): string {
       <span class="badge ${e.result === "success" ? "badge-create" : "badge-delete"}">${e.result}</span>
       ${approvalHtml(e)}
       ${e.proposal ? `<span class="chip">proposal ${escapeHtml(e.proposal)}</span>` : ""}
+      ${e.title ? `<b class="h-title">${escapeHtml(e.title)}</b>` : ""}
       <span class="h-count">${e.ops.length} op${e.ops.length === 1 ? "" : "s"}</span>
     </div>
     ${failures}
@@ -106,12 +113,13 @@ export function renderHistoryPage(m: HistoryPageModel): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>jt history — ${escapeHtml(m.scope)}</title>
-<style>${CSS}${HISTORY_CSS}</style>
+<title>${escapeHtml(m.heading ?? `jt history — ${m.scope}`)}</title>
+<style${m.cspNonce ? ` nonce="${escapeHtml(m.cspNonce)}"` : ""}>${CSS}${HISTORY_CSS}</style>
 </head>
 <body class="show-ctx">
 <header class="top">
-  <h1>jt history — ${escapeHtml(m.scope)}</h1>
+  ${m.back ? `<a class="crumb" href="${escapeHtml(m.back.href)}">${escapeHtml(m.back.label)}</a>` : ""}
+  <h1>${escapeHtml(m.heading ?? `jt history — ${m.scope}`)}</h1>
   <div class="target">applied to ${escapeHtml(m.target.baseUrl)} · project ${
     escapeHtml(m.target.project)
   } · ${m.entries.length} push${m.entries.length === 1 ? "" : "es"}, ${auto} sent without review</div>

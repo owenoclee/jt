@@ -13,7 +13,7 @@
  *
  * The committed layer and the intents file are per PROPOSAL (see proposal.ts). The
  * default proposal keeps them at the paths above; a named one keeps its own copies
- * under .jira/proposals/<name>/, beside its commit chain and review handoff files.
+ * under .jira/proposals/<name>/, beside its commit chain and its review state.
  * Everything else — working tree, base, seen, conflicts, journal — is shared: there is
  * one Jira, and one file per ticket. A ticket is therefore held by at most one proposal
  * at a time, and a Store is always scoped to one.
@@ -21,6 +21,7 @@
 import { basename, dirname, join } from "@std/path";
 import { serializeTicket, ticketsEqual } from "./canonical.ts";
 import { fail } from "./errors.ts";
+import { writeFileAtomic } from "./fsutil.ts";
 import { compareTicketIds } from "./keys.ts";
 import { parseTicket } from "./schema.ts";
 import { intentState } from "./intents.ts";
@@ -30,6 +31,7 @@ import type {
   ConflictRecord,
   IssueIntent,
   JournalEntry,
+  ProposalMeta,
   SyncState,
   Ticket,
   TicketStatus,
@@ -57,6 +59,8 @@ export class Store {
   readonly intentsFile: string;
   /** Pre-0.5 home of the intents file, read once so an in-flight workspace carries over. */
   readonly legacyDeletionsFile: string;
+  /** This proposal's review state (title, whether it is submitted, feedback). */
+  readonly metaFile: string;
   readonly conflictsFile: string;
   readonly syncFile: string;
 
@@ -73,6 +77,7 @@ export class Store {
     this.seenDir = join(this.jiraDir, "seen");
     this.intentsFile = join(this.proposalDir, "intents.json");
     this.legacyDeletionsFile = join(this.proposalDir, "deletions.json");
+    this.metaFile = join(this.proposalDir, "proposal.json");
     this.conflictsFile = join(this.jiraDir, "conflicts.json");
     this.syncFile = join(this.jiraDir, "sync.json");
   }
@@ -135,10 +140,41 @@ export class Store {
     return this.scoped(this.heldBy(id) ?? this.proposal);
   }
 
-  /** True once nothing is staged here and no review is pending or uncollected. */
+  /** This proposal's review state, or null when it has never been submitted. */
+  readMeta(): ProposalMeta | null {
+    try {
+      return JSON.parse(Deno.readTextFileSync(this.metaFile)) as ProposalMeta;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Record the review state; null removes it. */
+  writeMeta(meta: ProposalMeta | null): void {
+    if (meta === null) {
+      try {
+        Deno.removeSync(this.metaFile);
+      } catch {
+        // already gone
+      }
+      return;
+    }
+    Deno.mkdirSync(this.proposalDir, { recursive: true });
+    writeFileAtomic(this.metaFile, JSON.stringify(meta, null, 2) + "\n");
+  }
+
+  /**
+   * True once nothing is staged here and no push is executing. A push settles the
+   * layers before it is finished with the proposal, so "nothing staged" alone would
+   * let a concurrent command tidy away a proposal that is still being pushed. Review
+   * state on its own keeps nothing alive: a submitted proposal that has been emptied
+   * has nothing left to review.
+   */
   isDrained(): boolean {
     if (this.listCommittedIds().length > 0 || this.readIntents().length > 0) return false;
-    return !["chain.json", "push-spec.json", "pending-push.json", "push-result.json"].some((f) => {
+    if (this.readMeta()?.pushing) return false;
+    // The last two are a review opened by jt 0.6 or earlier (src/review/legacy.ts).
+    return !["chain.json", "pending-push.json", "push-result.json"].some((f) => {
       try {
         Deno.statSync(join(this.proposalDir, f));
         return true;
@@ -150,10 +186,15 @@ export class Store {
 
   /**
    * Remove a named proposal's directory once it has drained, so finished proposals do
-   * not accumulate. The default proposal lives in .jira itself and is never removed.
+   * not accumulate. The default proposal lives in .jira itself, so only its review
+   * state goes.
    */
   dropIfDrained(): void {
-    if (this.proposal === DEFAULT_PROPOSAL || !this.isDrained()) return;
+    if (!this.isDrained()) return;
+    if (this.proposal === DEFAULT_PROPOSAL) {
+      this.writeMeta(null);
+      return;
+    }
     try {
       Deno.removeSync(this.proposalDir, { recursive: true });
     } catch {
@@ -430,7 +471,7 @@ export class Store {
       return;
     }
     Deno.mkdirSync(dirname(this.intentsFile), { recursive: true });
-    Deno.writeTextFileSync(this.intentsFile, JSON.stringify(intents, null, 2) + "\n");
+    writeFileAtomic(this.intentsFile, JSON.stringify(intents, null, 2) + "\n");
   }
 
   readConflicts(): ConflictRecord[] {
@@ -450,7 +491,7 @@ export class Store {
       }
       return;
     }
-    Deno.writeTextFileSync(this.conflictsFile, JSON.stringify(conflicts, null, 2) + "\n");
+    writeFileAtomic(this.conflictsFile, JSON.stringify(conflicts, null, 2) + "\n");
   }
 
   // ---- journal ----
@@ -468,6 +509,11 @@ export class Store {
 
   /** This proposal's latest push from the journal, or null when it has never pushed. */
   lastPush(): JournalEntry | null {
+    return this.lastPushRecord()?.entry ?? null;
+  }
+
+  /** The same, with the journal file it was read from. */
+  lastPushRecord(): { path: string; entry: JournalEntry } | null {
     // Filenames start with the push's start time, so they sort chronologically; only
     // the newest of this proposal's needs reading.
     const suffix = this.proposal === DEFAULT_PROPOSAL
@@ -484,8 +530,9 @@ export class Store {
       return null;
     }
     for (const name of names) {
-      const entry = JSON.parse(Deno.readTextFileSync(join(this.journalDir, name))) as JournalEntry;
-      if ((entry.proposal ?? DEFAULT_PROPOSAL) === this.proposal) return entry;
+      const path = join(this.journalDir, name);
+      const entry = JSON.parse(Deno.readTextFileSync(path)) as JournalEntry;
+      if ((entry.proposal ?? DEFAULT_PROPOSAL) === this.proposal) return { path, entry };
     }
     return null;
   }
@@ -506,10 +553,16 @@ export class Store {
     return ids.length > 0 ? { pushedAt: last.startedAt, ids } : null;
   }
 
-  listJournal(): { path: string; entry: JournalEntry }[] {
+  /**
+   * Every journaled push, newest first. `since` (an ISO time) leaves older files
+   * unread: their names start with the push's start time, so the cut is made on the
+   * name alone.
+   */
+  listJournal(since?: string): { path: string; entry: JournalEntry }[] {
+    const from = since?.replace(/[:.]/g, "-");
     try {
       return [...Deno.readDirSync(this.journalDir)]
-        .filter((e) => e.isFile && e.name.endsWith(".json"))
+        .filter((e) => e.isFile && e.name.endsWith(".json") && (from === undefined || e.name >= from))
         .map((e) => {
           const path = join(this.journalDir, e.name);
           return { path, entry: JSON.parse(Deno.readTextFileSync(path)) as JournalEntry };

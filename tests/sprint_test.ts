@@ -7,7 +7,7 @@ import { assertEquals, assertStringIncludes } from "@std/assert";
 import { cmdCommit } from "../src/commands/commit.ts";
 import { cmdFetch } from "../src/commands/fetch.ts";
 import { cmdPush } from "../src/commands/push.ts";
-import { cmdAwait } from "../src/commands/push_detach.ts";
+import { cmdAwait } from "../src/commands/review.ts";
 import { errorOf, withWorkspace } from "./workspace.ts";
 
 Deno.test({

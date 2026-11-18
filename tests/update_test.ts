@@ -111,7 +111,7 @@ Deno.test("the check can be switched off, and stays out of machine-read commands
     Deno.env.delete("JT_NO_UPDATE_CHECK");
     Deno.env.delete("CI");
     assertEquals(updateCheckEnabled("status"), true);
-    assertEquals(updateCheckEnabled("_push-serve"), false);
+    assertEquals(updateCheckEnabled("serve"), false);
     assertEquals(updateCheckEnabled("schema"), false);
     Deno.env.set("JT_NO_UPDATE_CHECK", "1");
     assertEquals(updateCheckEnabled("status"), false);

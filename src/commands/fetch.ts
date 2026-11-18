@@ -40,7 +40,7 @@ interface PullCounts {
  * Integrate a fetched entry and record any committed-layer rewrite in the chain as a
  * synthetic "remote" entry (or prune, when the rebase drained the ticket entirely).
  */
-function integrateWithChain(
+export function integrateWithChain(
   anyStore: Store,
   entry: Parameters<typeof integrateFetched>[1],
   rebases: Rebase[],
@@ -69,7 +69,7 @@ function integrateWithChain(
   return result;
 }
 
-interface Rebase {
+export interface Rebase {
   /** Scoped to the proposal whose committed copy was rewritten. */
   store: Store;
   key: string;
@@ -78,7 +78,7 @@ interface Rebase {
 }
 
 /** One synthetic "remote" chain entry per proposal that had committed copies rebased. */
-function recordRebases(rebases: Rebase[]): void {
+export function recordRebases(rebases: Rebase[]): void {
   for (const proposal of new Set(rebases.map((r) => r.store.proposal))) {
     const own = rebases.filter((r) => r.store.proposal === proposal);
     const note = `rebase: remote changed ${
@@ -154,7 +154,9 @@ export async function cmdPull(argv: string[] = []): Promise<void> {
         report(key, integrateWithChain(store, entry, rebases));
       }
     } catch (e) {
-      if (e instanceof JiraApiError && e.status === 404) {
+      // A rejected token also answers 404 here. That is no evidence the issue is gone,
+      // and treating it as such would remove clean local copies.
+      if (e instanceof JiraApiError && e.status === 404 && !e.authRejected) {
         handleRemoteDeleted(store, key);
         counts.removed++;
       } else {

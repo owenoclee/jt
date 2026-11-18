@@ -1,20 +1,22 @@
 /**
- * jt await must not miss a review that settles while it is looking.
+ * A review opened by jt 0.6 or earlier is still collected by jt await — and must not
+ * be missed if it settles while await is looking.
  *
- * The review server records its outcome and then removes its pending file. An await
- * that reads "no outcome yet", then "no pending review", has straddled that moment —
- * and used to report that there was nothing to await, leaving the outcome uncollected.
+ * The old review server recorded its outcome and then removed its pending file. An
+ * await that reads "no outcome yet", then "no pending review", has straddled that
+ * moment — and once reported that there was nothing to await, leaving the outcome
+ * uncollected.
  */
 import { assert, assertEquals } from "@std/assert";
 import { cmdInit } from "../src/commands/init.ts";
-import { cmdAwait } from "../src/commands/push_detach.ts";
+import { cmdAwait } from "../src/commands/review.ts";
 import {
   clearPending,
   readResult,
   resultPath,
   writePending,
   writeResult,
-} from "../src/review/handoff.ts";
+} from "../src/review/legacy.ts";
 import { Store } from "../src/store.ts";
 
 Deno.test("await collects an outcome that lands between its two looks", async () => {

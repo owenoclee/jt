@@ -227,6 +227,7 @@ export function renderJournalEntry(
     : red(e.result);
   const proposal = e.proposal ? `  ${cyan(`[proposal ${e.proposal}]`)}` : "";
   lines.push(`${bold(e.startedAt)}  ${badge}${proposal}  ${dim(path)}`);
+  if (e.title) lines.push(`  ${bold(e.title)}`);
   if (e.review) {
     const secs = (e.review.decideMs / 1000).toFixed(e.review.decideMs < 10_000 ? 1 : 0);
     const ua = e.review.userAgent ? ` · ${e.review.userAgent.slice(0, 60)}` : "";

@@ -149,3 +149,27 @@ Deno.test("requests ask for English so failures are not localized", async () => 
   );
   assert(seen === "en", `Accept-Language was ${seen}`);
 });
+
+Deno.test("a pull with a rejected token removes nothing: its 404s are not deletions", async () => {
+  const { withWorkspace, errorOf } = await import("./workspace.ts");
+  const { cmdPull } = await import("../src/commands/fetch.ts");
+  await withWorkspace(["One", "Two"], async (ws) => {
+    // A workspace that tracks individual tickets (no sync.jql) asks Jira for each one
+    // by key — and a rejected token answers every one of those with a 404.
+    const configPath = `${ws.dir}/.jira/config.json`;
+    const { sync: _mirror, ...config } = JSON.parse(Deno.readTextFileSync(configPath));
+    Deno.writeTextFileSync(configPath, JSON.stringify(config));
+    ws.mock.intercept = () =>
+      new Response(JSON.stringify({ errorMessages: ["事务不存在或者您没有查看的权限。"], errors: {} }), {
+        status: 404,
+        headers: { "Content-Type": "application/json", "x-seraph-loginreason": "AUTHENTICATED_FAILED" },
+      });
+
+    const msg = await errorOf(() => cmdPull([]));
+    assert(msg.includes("most likely expired or been revoked"), msg);
+    const store = ws.store();
+    assertEquals(store.listBaseKeys(), ["TST-1", "TST-2"], "nothing was taken for deleted");
+    assert(store.workingExists("TST-1") && store.workingExists("TST-2"));
+    assert(!ws.logs.some((l) => l.includes("deleted remotely")), ws.logs.join("\n"));
+  });
+});

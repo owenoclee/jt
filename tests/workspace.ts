@@ -4,10 +4,16 @@ import { join } from "@std/path";
 import { cmdFetch } from "../src/commands/fetch.ts";
 import { cmdInit } from "../src/commands/init.ts";
 import { cmdMeta } from "../src/commands/meta.ts";
+import { setServerLauncher } from "../src/commands/serve.ts";
 import { setActiveProposal } from "../src/proposal.ts";
-import { readPending } from "../src/review/handoff.ts";
+import { createHub, type Hub } from "../src/review/hub.ts";
 import { Store } from "../src/store.ts";
+import type { ReviewComment } from "../src/types.ts";
+import { decide, type Decided, open, type Opened, ORIGIN } from "./hub_client.ts";
 import { MockJira } from "./mock_jira.ts";
+
+/** The workspace's name on the review server: its project key. */
+export const SLUG = "TST";
 
 export interface TestWorkspace {
   mock: MockJira;
@@ -19,9 +25,24 @@ export interface TestWorkspace {
   as: <T>(proposal: string | null, fn: () => T | Promise<T>) => Promise<T>;
   /** Write the user's settings file (what ~/.config/jt/settings.json would hold). */
   writeSettings: (settings: unknown) => void;
-  /** POST a decision to the review page a proposal has pending. */
-  decide: (proposal: string | null, decision: "approve" | "request-changes") => Promise<void>;
-  /** The HTML of the review page a proposal has pending. */
+  /**
+   * The review server, in this process: `jt push` in a test finds this one instead of
+   * starting a real one. Driven with the helpers in hub_client.ts.
+   */
+  hub: Hub;
+  /** Open a submitted proposal's link as its reviewer's browser would. */
+  open: (proposal: string | null) => Promise<Opened>;
+  /**
+   * Review a submitted proposal: open its page and decide. Approving sends the push
+   * before this returns. Asking for changes needs comments; one is supplied if none
+   * are given. Throws unless the decision was accepted.
+   */
+  decide: (
+    proposal: string | null,
+    decision: "approve" | "request-changes",
+    comments?: ReviewComment[],
+  ) => Promise<Decided["body"]>;
+  /** The HTML of the reviewable page a submitted proposal has. */
   page: (proposal: string | null) => Promise<string>;
 }
 
@@ -47,10 +68,17 @@ export async function withWorkspace(
   console.log = (...a: unknown[]) => logs.push(a.map(String).join(" "));
 
   const store = (proposal?: string) => new Store(dir, proposal);
-  const pendingUrl = (proposal: string | null): string => {
-    const pending = readPending(store(proposal ?? undefined).proposalDir);
-    if (!pending) throw new Error(`no review pending for ${proposal ?? "the default proposal"}`);
-    return pending.url;
+  const hub = createHub();
+  setServerLauncher(() => Promise.resolve(ORIGIN));
+  const reviewable = async (proposal: string | null): Promise<Opened & { page: string; token: string }> => {
+    const opened = await open(hub, SLUG, proposal ?? "default");
+    if (!opened.page || !opened.token) {
+      throw new Error(
+        `${proposal ?? "the default proposal"} is not reviewable: ` +
+          JSON.stringify(opened.refresh ?? { status: opened.localStatus }),
+      );
+    }
+    return opened as Opened & { page: string; token: string };
   };
   try {
     cmdInit(["--base-url", mock.baseUrl, "--email", "t@example.com", "--project", "TST"]);
@@ -73,18 +101,21 @@ export async function withWorkspace(
         Deno.mkdirSync(join(home, ".config", "jt"), { recursive: true });
         Deno.writeTextFileSync(join(home, ".config", "jt", "settings.json"), JSON.stringify(settings));
       },
-      decide: async (proposal, decision) => {
-        const res = await fetch(pendingUrl(proposal).replace("/review/", "/decide/"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ decision, notes: {} }),
-        });
-        if (res.status !== 200) throw new Error(`decision POST answered ${res.status}`);
-        await res.body?.cancel();
+      hub,
+      open: (proposal) => open(hub, SLUG, proposal ?? "default"),
+      decide: async (proposal, decision, comments) => {
+        const { token } = await reviewable(proposal);
+        const said = comments ?? (decision === "request-changes" ? [{ body: "please change this" }] : []);
+        const done = await decide(hub, SLUG, proposal ?? "default", token, decision, said);
+        if (done.status !== 200) {
+          throw new Error(`the decision was answered ${done.status}: ${JSON.stringify(done.body)}`);
+        }
+        return done.body;
       },
-      page: async (proposal) => await (await fetch(pendingUrl(proposal))).text(),
+      page: async (proposal) => (await reviewable(proposal)).page,
     });
   } finally {
+    setServerLauncher(null);
     setActiveProposal(null);
     console.log = prev.log;
     Deno.chdir(prev.cwd);

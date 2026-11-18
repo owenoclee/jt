@@ -12,7 +12,8 @@ import { fail, UserError } from "../errors.ts";
 import { intentNoun, STAGED_INTENT_STATES } from "../intents.ts";
 import { DEFAULT_PROPOSAL, explicitProposalFlag, proposalFlag } from "../proposal.ts";
 import { mdToAdf } from "../adf/md_to_adf.ts";
-import { bold, dim, green } from "../render/colors.ts";
+import { markRevised, revisedNotice } from "../review/meta.ts";
+import { bold, dim, green, yellow } from "../render/colors.ts";
 import {
   checkStatusKnown,
   resolveFieldAlias,
@@ -106,7 +107,11 @@ export function cmdCommit(argv: string[]): void {
 
   appendChainEntry(store, "agent", note || `commit ${committed.join(", ")}`, snapshots);
   console.log(`${green("committed:")} ${committed.map(bold).join(", ")}`);
-  console.log(dim(`review what push will send: jt diff --committed${flag} · then: jt push${flag}`));
+  if (markRevised(store)) {
+    console.log(yellow(revisedNotice(mine, flag)));
+  } else {
+    console.log(dim(`review what push will send: jt diff --committed${flag} · then: jt push${flag}`));
+  }
 }
 
 /** Move a staged-but-uncommitted intent from the proposal it was staged in to this one. */

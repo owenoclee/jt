@@ -4,52 +4,39 @@
  */
 import "./hermetic.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
 import { cmdCommit } from "../src/commands/commit.ts";
 import { cmdFetch } from "../src/commands/fetch.ts";
 import { cmdInit } from "../src/commands/init.ts";
 import { cmdArchive, cmdDiff, cmdRestore, cmdRm, cmdUnarchive } from "../src/commands/local.ts";
 import { cmdMeta } from "../src/commands/meta.ts";
 import { cmdPush } from "../src/commands/push.ts";
-import { cmdAwait } from "../src/commands/push_detach.ts";
-import { clearResult, readPending, readResult } from "../src/review/handoff.ts";
+import { cmdAwait } from "../src/commands/review.ts";
+import { setServerLauncher } from "../src/commands/serve.ts";
+import { createHub } from "../src/review/hub.ts";
 import { intentFailure } from "../src/intents.ts";
 import { Store } from "../src/store.ts";
+import { ORIGIN, reviewHere } from "./hub_client.ts";
 import { MockJira } from "./mock_jira.ts";
 
-async function approve(): Promise<void> {
-  await cmdPush([]);
-  const pending = readPending(join(Deno.cwd(), ".jira"));
-  if (!pending) throw new Error("no pending review after push");
-  const res = await fetch(pending.url.replace("/review/", "/decide/"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ decision: "approve", notes: {} }),
-  });
-  await res.body?.cancel();
-}
+const hub = createHub();
+setServerLauncher(() => Promise.resolve(ORIGIN));
 
 async function pushApproved(): Promise<void> {
-  await approve();
+  await cmdPush([]);
+  const done = await reviewHere(hub, "approve");
+  assertEquals(done.pushFailure, null, done.log?.join("\n"));
   await cmdAwait([]);
 }
 
 /**
  * Same, for a push whose ops fail: `jt await` would exit(1), which a test runner
- * cannot survive, so the outcome is collected straight from the handoff file.
+ * cannot survive, so what the push said is taken from the reviewer's page.
  */
 async function pushApprovedFailing(): Promise<string[]> {
-  await approve();
-  const jiraDir = join(Deno.cwd(), ".jira");
-  for (let i = 0; i < 200; i++) {
-    const result = readResult(jiraDir);
-    if (result) {
-      clearResult(jiraDir);
-      return result.log;
-    }
-    await new Promise((r) => setTimeout(r, 25));
-  }
-  throw new Error("push never recorded an outcome");
+  await cmdPush([]);
+  const done = await reviewHere(hub, "approve");
+  assert(done.pushFailure, "expected the push to stop at a failure");
+  return done.log ?? [];
 }
 
 /** A workspace wired to a fresh mock, with `logs` capturing everything printed. */

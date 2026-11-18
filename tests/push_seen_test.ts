@@ -13,12 +13,12 @@ import { cmdPull } from "../src/commands/fetch.ts";
 import { cmdInit } from "../src/commands/init.ts";
 import { cmdRm } from "../src/commands/local.ts";
 import { cmdMeta } from "../src/commands/meta.ts";
-import { checkStaleness } from "../src/commands/push.ts";
-import { compilePush } from "../src/compile.ts";
-import { localContext, withClient, withMeta } from "../src/context.ts";
-import { type ReviewOutcome, runReviewFlow } from "../src/review/server.ts";
+import { cmdPush } from "../src/commands/push.ts";
+import { setServerLauncher } from "../src/commands/serve.ts";
+import { createHub } from "../src/review/hub.ts";
 import { Store } from "../src/store.ts";
 import type { Ticket } from "../src/types.ts";
+import { type Decided, ORIGIN, reviewHere } from "./hub_client.ts";
 import { MockJira } from "./mock_jira.ts";
 
 function readTicket(store: Store, id: string): Ticket {
@@ -27,27 +27,16 @@ function readTicket(store: Store, id: string): Ticket {
   return wf.ticket;
 }
 
+const hub = createHub();
+setServerLauncher(() => Promise.resolve(ORIGIN));
+
 /**
- * Compile + review + approve over HTTP (not cmdPush: that exits the process on a
- * partial failure, which one step here provokes deliberately). `beforeDecide` runs
- * between page-served and approval — the window where remote state can shift.
+ * Submit, then approve as the reviewer would. `beforeDecide` runs between the page
+ * being rendered and the approval — the window where remote state can shift.
  */
-async function approvePush(beforeDecide?: () => void): Promise<ReviewOutcome> {
-  const ctx = withClient(withMeta(localContext()));
-  const compiled = await compilePush(ctx);
-  await checkStaleness(ctx, compiled.existingKeys);
-  let url = "";
-  const flow = runReviewFlow(ctx, compiled, { onServe: (u) => (url = u) });
-  while (!url) await new Promise((r) => setTimeout(r, 5));
-  beforeDecide?.();
-  const res = await fetch(url.replace("/review/", "/decide/"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ decision: "approve", notes: {} }),
-  });
-  assertEquals(res.status, 200);
-  await res.body?.cancel();
-  return await flow;
+async function approvePush(beforeDecide?: () => void): Promise<Decided["body"]> {
+  await cmdPush([]);
+  return await reviewHere(hub, "approve", { beforeDecide });
 }
 
 Deno.test("push absorbs the approved delta into seen; remote news survives", async (t) => {

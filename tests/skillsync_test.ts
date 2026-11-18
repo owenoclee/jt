@@ -33,7 +33,7 @@ Deno.test("every shipped entry is a sha256 and a version", () => {
 });
 
 Deno.test("skill sync never runs for commands whose output is machine-read", () => {
-  for (const cmd of ["skill", "schema", "_push-serve"]) assertEquals(skillSyncEnabled(cmd), false);
+  for (const cmd of ["skill", "schema", "serve"]) assertEquals(skillSyncEnabled(cmd), false);
   for (const cmd of ["status", "push", "await", "version", undefined]) {
     assertEquals(skillSyncEnabled(cmd), true);
   }

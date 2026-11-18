@@ -4,12 +4,12 @@
  * tool-owned layers; the page's only dynamism is tab switching, per-ticket decisions,
  * and the single POST that reports them.
  */
-import { marked } from "marked";
+import { Marked } from "marked";
 import { type DiffEntry, diffTickets } from "../diff.ts";
 import { lineDiff } from "../diff.ts";
 import { intentNoun } from "../intents.ts";
 import { NO_REFS, type RefContext } from "../refs.ts";
-import type { IntentMode, Ticket } from "../types.ts";
+import type { IntentMode, ReviewComment, Ticket } from "../types.ts";
 
 export function escapeHtml(s: string): string {
   return s
@@ -19,15 +19,38 @@ export function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
+const SAFE_LINK = /^(https?:|mailto:)/i;
+
+const safeMarkdown = new Marked({
+  renderer: {
+    // Raw HTML is shown as the text it is, never handed to the browser.
+    html(token) {
+      return escapeHtml(token.text);
+    },
+    // Only links that go somewhere on the web keep their href; anything else
+    // (javascript:, data:, a relative path into this server) is left as its text.
+    link(token) {
+      if (SAFE_LINK.test(token.href.trim())) return false;
+      return this.parser.parseInline(token.tokens);
+    },
+    image(token) {
+      return escapeHtml(token.text || token.href);
+    },
+  },
+});
+
 /**
- * Markdown -> HTML for display. Committed markdown has already passed the mdToAdf
- * subset validation (no raw HTML constructs), and remote-sourced markdown comes from
- * adfToMd which escapes tag-like text — but escape defensively anyway by rendering
- * with marked and stripping is unnecessary; instead we rely on marked's encoding of
- * code spans plus the subset guarantee.
+ * Markdown -> HTML for display, safe to put on a page that can approve a push.
+ *
+ * What is rendered here is not all jt's own: a ticket's description comes from Jira
+ * as whoever last edited it left it, and reaches a review page unvalidated on delete
+ * and archive cards and in copies rebased onto a remote edit. Every proposal's page
+ * shares one origin, so markup that ran as script in one could act on any of them.
+ * Raw HTML is therefore escaped and link targets are allowlisted; the server's
+ * Content-Security-Policy is the second line, not the only one.
  */
 export function mdToHtml(md: string): string {
-  return marked.parse(md, { async: false }) as string;
+  return safeMarkdown.parse(md, { async: false }) as string;
 }
 
 export interface TicketSection {
@@ -87,6 +110,36 @@ export interface ReviewPageModel {
   nonce: string;
   /** Info pages only — drives the expiry countdown. Review pages never expire. */
   timeoutMs?: number;
+  /** Set on a proposal's own page on the review server: its header, and what the
+      page may do. */
+  proposal?: ProposalHeader;
+  /** The nonce in this response's Content-Security-Policy, for the inline style and
+      script. Pages written to disk have no policy and no nonce. */
+  cspNonce?: string;
+}
+
+/** What a proposal's page says about the proposal itself, above its changes. */
+export interface ProposalHeader {
+  name: string;
+  /** The workspace's short name on the review server. */
+  workspace: string;
+  title: string;
+  /** The author's description, already rendered to safe HTML. */
+  descriptionHtml: string;
+  status: { label: string; tone: "wait" | "ok" | "warn" | "error" | "muted" };
+  submittedAt?: string;
+  /** Plain-text notices under the header: what was absorbed from Jira, what blocks. */
+  banners: { tone: "info" | "warn" | "error"; text: string }[];
+  /** Review comments already made, shown where they were made: under their ticket,
+      or under the description for a comment on the proposal as a whole. */
+  comments?: { label: string; items: ReviewComment[] };
+  inboxUrl: string;
+  /** Present when this view may decide: where to POST, and the token binding the
+      decision to exactly what was rendered. */
+  decide?: { url: string; token: string };
+  /** Present when the page should ask the server to check the proposal against Jira.
+      `tag` is the state this page shows, so the server can say whether it moved. */
+  refresh?: { url: string; csrf: string; tag: string };
 }
 
 /**
@@ -347,6 +400,10 @@ function fmt(v: unknown): string {
 export function renderPage(model: ReviewPageModel): string {
   const isReview = model.mode === "review";
   const isInfo = model.mode === "info";
+  const p = model.proposal;
+  // Inline style and script carry the nonce the server put in the page's CSP; pages
+  // written to disk (jt diff --web, jt log --web) have neither.
+  const nonce = model.cspNonce ? ` nonce="${escapeHtml(model.cspNonce)}"` : "";
   // Header ids link to the ticket in Jira; pending creations ("@name") have nowhere to link.
   const heading = (id: string, summary: string) => {
     const label = id.startsWith("@")
@@ -356,6 +413,12 @@ export function renderPage(model: ReviewPageModel): string {
       }" target="_blank" rel="noopener">${escapeHtml(id)}</a>`;
     return `<h3>${label} <span class="summary" title="${escapeHtml(summary)}">${escapeHtml(summary)}</span></h3>`;
   };
+  const earlier = (on: string | undefined) =>
+    (p?.comments?.items ?? []).filter((c) => c.on === on).map((c) =>
+      `<div class="rcomment"><div class="comment-tag">${escapeHtml(p!.comments!.label)}</div>${
+        escapeHtml(c.body)
+      }</div>`
+    ).join("");
   const firstAuto = model.tickets.findIndex((t) => t.autoAllowed);
   const ticketCards = model.tickets.map((t, index) => {
     const collapsed = t.unchangedSinceReview;
@@ -368,12 +431,16 @@ export function renderPage(model: ReviewPageModel): string {
       ? `<span class="unchanged">unchanged since your last review ✓
            <button class="expand" type="button">expand</button></span>`
       : "";
-    const note = isReview
-      ? `<div class="notebar" data-ticket="${escapeHtml(t.id)}">
-          <input type="text" class="note" placeholder="feedback on ${
+    // Comments sit under the changes they are about, as on a pull request: the ones
+    // already made, then a box for a new one while the page can still decide.
+    const said = earlier(t.id);
+    const box = isReview
+      ? `<textarea class="note" rows="1" placeholder="Comment on ${
         escapeHtml(t.id)
-      } (returned to the agent when you request changes)">
-        </div>`
+      } — asks for changes instead of approving"></textarea>`
+      : "";
+    const note = said || box
+      ? `<div class="notebar" data-ticket="${escapeHtml(t.id)}">${said}${box}</div>`
       : "";
     return `${divider}<section class="ticket${collapsed ? " collapsed" : ""}${
       t.autoAllowed ? " auto-allowed" : ""
@@ -434,6 +501,7 @@ export function renderPage(model: ReviewPageModel): string {
 
   const footer = isReview
     ? `<footer class="sendbar">
+        <textarea id="overall" rows="1" placeholder="Comment on the proposal as a whole — asks for changes instead of approving"></textarea>
         <button id="request" type="button">Request changes</button>
         <button id="approve" type="button">Approve &amp; push all ${model.tickets.length}</button>
       </footer>`
@@ -451,45 +519,161 @@ export function renderPage(model: ReviewPageModel): string {
        Acknowledge only records it as seen.</div>`
     : "";
 
+  // A proposal's own header: what it is called, where it stands, and what its author
+  // and its reviewer have said about it as a whole.
+  const count = `${model.tickets.length} ticket${model.tickets.length === 1 ? "" : "s"}`;
+  const top = p
+    ? `<header class="top">
+  <a class="crumb" href="${escapeHtml(p.inboxUrl)}">← all proposals</a>
+  <h1>${escapeHtml(p.title)} <span class="pstate pstate-${p.status.tone}">${escapeHtml(p.status.label)}</span></h1>
+  <div class="target">proposal <b>${escapeHtml(p.name)}</b> in ${escapeHtml(p.workspace)} · ${count}${
+      p.submittedAt
+        ? ` · submitted <time datetime="${escapeHtml(p.submittedAt)}">${escapeHtml(p.submittedAt)}</time>`
+        : ""
+    } · → ${escapeHtml(model.target.baseUrl)} · project ${escapeHtml(model.target.project)}</div>
+</header>
+<div id="banners">${
+      p.banners.map((b) => `<div class="banner banner-${b.tone}">${escapeHtml(b.text)}</div>`).join("")
+    }</div>
+${p.descriptionHtml ? `<section class="pdesc md">${p.descriptionHtml}</section>` : ""}
+${earlier(undefined) ? `<section class="pcomments">${earlier(undefined)}</section>` : ""}`
+    : `<header class="top">
+  <h1>${escapeHtml(model.title)}</h1>
+  <div class="target">→ ${escapeHtml(model.target.baseUrl)} · project ${escapeHtml(model.target.project)}</div>
+</header>`;
+
+  // The decision. A comment anywhere means "request changes": the two are mutually
+  // exclusive, because an approval is sent at once and nobody would read the comment.
+  const decideUrl = p?.decide?.url ?? `/decide/${model.nonce}`;
   const reviewJs = isReview
     ? `
-    const nonce = ${JSON.stringify(model.nonce)};
+    const decideUrl = ${JSON.stringify(decideUrl)};
+    const decideToken = ${JSON.stringify(p?.decide?.token ?? "")};
     const tickets = [...document.querySelectorAll('section.ticket[data-id]')];
-    function notes() {
-      const out = {};
+    const overall = document.getElementById('overall');
+    function comments() {
+      const out = [];
+      const general = overall.value.trim();
+      if (general) out.push({ body: general });
       for (const t of tickets) {
         const v = t.querySelector('.note')?.value?.trim();
-        if (v) out[t.dataset.id] = v;
+        if (v) out.push({ on: t.dataset.id, body: v });
       }
       return out;
     }
-    // Feedback and approval are mutually exclusive: any non-empty note blocks approve.
     const approveBtn = document.getElementById('approve');
+    const requestBtn = document.getElementById('request');
     const approveLabel = approveBtn.textContent;
     function refreshButtons() {
-      const n = Object.keys(notes()).length;
+      const n = comments().length;
       approveBtn.disabled = n > 0;
       approveBtn.textContent = n > 0
-        ? 'Approve blocked — ' + n + ' note' + (n === 1 ? '' : 's') + ' pending'
+        ? 'Approve blocked — ' + n + ' comment' + (n === 1 ? '' : 's') + ' pending'
         : approveLabel;
-      approveBtn.title = n > 0 ? 'Clear the feedback notes to approve, or Request changes.' : '';
+      approveBtn.title = n > 0 ? 'Clear the comments to approve, or Request changes.' : '';
+      requestBtn.disabled = n === 0;
+      requestBtn.title = n === 0 ? 'Say what should change: comment on a ticket, or on the proposal.' : '';
     }
-    document.addEventListener('input', refreshButtons);
+    document.addEventListener('input', (e) => {
+      if (e.target.tagName === 'TEXTAREA') {
+        e.target.style.height = 'auto';
+        e.target.style.height = e.target.scrollHeight + 'px';
+      }
+      refreshButtons();
+    });
     refreshButtons();
-    async function send(decision) {
-      const res = await fetch('/decide/' + nonce, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ decision, notes: notes() }),
-      });
-      document.body.innerHTML = res.ok
-        ? (decision === 'approve'
-          ? '<div class="done">Approved — jt is pushing the whole changeset. You can close this tab and return to your session.</div>'
-          : '<div class="done">Changes requested — nothing was sent; your notes are on their way to the agent. You can close this tab.</div>')
-        : '<div class="done">Something went wrong (' + res.status + '). Check the terminal.</div>';
+    function finished(headline, lines, ok) {
+      const done = document.createElement('div');
+      done.className = 'done' + (ok ? '' : ' done-bad');
+      const h = document.createElement('h2');
+      h.textContent = headline;
+      done.appendChild(h);
+      if (lines && lines.length) {
+        const pre = document.createElement('pre');
+        pre.textContent = lines.join('\\n');
+        done.appendChild(pre);
+      }
+      if (${JSON.stringify(Boolean(p))}) {
+        const back = document.createElement('a');
+        back.href = ${JSON.stringify(p?.inboxUrl ?? "/")};
+        back.textContent = '← all proposals';
+        done.appendChild(back);
+      }
+      document.body.replaceChildren(done);
     }
-    document.getElementById('approve').addEventListener('click', () => send('approve'));
-    document.getElementById('request').addEventListener('click', () => send('request-changes'));`
+    async function send(decision) {
+      approveBtn.disabled = requestBtn.disabled = true;
+      if (decision === 'approve') approveBtn.textContent = 'Pushing…';
+      let res, body = {};
+      try {
+        res = await fetch(decideUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ decision, comments: comments(), token: decideToken }),
+        });
+        body = await res.json().catch(() => ({}));
+      } catch (e) {
+        finished('The review server did not answer — nothing was recorded.', [String(e)], false);
+        return;
+      }
+      // The proposal, or Jira underneath it, changed after this page was rendered:
+      // nothing was sent, and the page reloads to show what is true now.
+      if (res.status === 409 && body.reload) { location.replace(location.pathname); return; }
+      if (!res.ok) {
+        finished(body.error || 'Something went wrong (' + res.status + ') — nothing was recorded.', body.log, false);
+        return;
+      }
+      if (decision !== 'approve') {
+        finished('Changes requested — nothing was sent. Your comments are saved on the proposal for its agent.', [], true);
+      } else if (body.pushFailure) {
+        finished('Approved, but the push stopped at a failure.', body.log, false);
+      } else {
+        finished('Approved and pushed.', body.log, true);
+      }
+    }
+    approveBtn.addEventListener('click', () => send('approve'));
+    requestBtn.addEventListener('click', () => send('request-changes'));`
+    : "";
+  // A proposal's link renders what is on disk and touches nothing. Checking it against
+  // Jira is a request this page makes itself, so no other site can set it off.
+  const refreshJs = p?.refresh
+    ? `
+    (async () => {
+      const banners = document.getElementById('banners');
+      const note = document.createElement('div');
+      note.className = 'banner banner-info';
+      note.textContent = 'Checking this proposal against Jira…';
+      banners.prepend(note);
+      try {
+        const res = await fetch(${JSON.stringify(p.refresh.url)}, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ csrf: ${JSON.stringify(p.refresh.csrf)}, tag: ${JSON.stringify(p.refresh.tag)} }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (res.ok && body.view) { location.replace(location.pathname + '?v=' + encodeURIComponent(body.view)); return; }
+        if (body.reload) { location.replace(location.pathname); return; }
+        if (res.ok && body.same) { note.remove(); return; }
+        note.className = 'banner banner-error';
+        note.textContent = (body.error || 'Could not check this proposal against Jira (' + res.status + ').') +
+          ' Showing it as it was last staged; it cannot be approved from this view. Reload to try again.';
+      } catch (e) {
+        note.className = 'banner banner-error';
+        note.textContent = 'The review server did not answer (' + e + '). Reload to try again.';
+      }
+    })();`
+    : "";
+  // Timestamps arrive as ISO strings; show them in the reader's own terms.
+  const timeJs = p
+    ? `
+    document.querySelectorAll('time[datetime]').forEach((el) => {
+      const then = new Date(el.dateTime);
+      if (isNaN(then)) return;
+      const mins = Math.round((Date.now() - then) / 60000);
+      el.title = then.toLocaleString();
+      el.textContent = mins < 1 ? 'just now' : mins < 60 ? mins + 'm ago'
+        : mins < 1440 ? Math.round(mins / 60) + 'h ago' : Math.round(mins / 1440) + 'd ago';
+    });`
     : "";
   const infoJs = isInfo
     ? `
@@ -514,8 +698,8 @@ export function renderPage(model: ReviewPageModel): string {
       b.remove();
     }));`;
   // Unchanged-field context: the ⚙ panel controls a master toggle plus one checkbox per
-  // field found on the page. Preferences persist in localStorage (best effort — the
-  // origin varies across pushes because the port is random). No \${} interpolation here.
+  // field found on the page. Preferences persist in localStorage — per origin, so they
+  // carry across every proposal on the review server. No \${} interpolation here.
   const ctxJs = `
     const ctxFields = [...new Set(
       [...document.querySelectorAll('[data-ctx-field]')].map((el) => el.dataset.ctxField),
@@ -571,14 +755,11 @@ export function renderPage(model: ReviewPageModel): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeHtml(model.title)}</title>
-<style>${CSS}</style>
+<title>${escapeHtml(p ? `${p.title} — jt proposal ${p.name}` : model.title)}</title>
+<style${nonce}>${CSS}</style>
 </head>
 <body${isInfo ? ' class="info"' : ""}>
-<header class="top">
-  <h1>${escapeHtml(model.title)}</h1>
-  <div class="target">→ ${escapeHtml(model.target.baseUrl)} · project ${escapeHtml(model.target.project)}</div>
-</header>
+${top}
 ${infoBanner}
 <nav class="tabs">
   <button class="tab active" data-tab="changes">changes (${model.tickets.length})</button>
@@ -598,7 +779,7 @@ ${infoBanner}
   ${commitPanels}
 </main>
 ${footer}
-<script>
+<script${nonce}>
 document.querySelectorAll('.tab[data-tab]').forEach((b) => b.addEventListener('click', () => {
   document.querySelectorAll('.tab[data-tab]').forEach((x) => x.classList.remove('active'));
   document.querySelectorAll('.panel').forEach((p) => p.hidden = true);
@@ -607,7 +788,9 @@ document.querySelectorAll('.tab[data-tab]').forEach((b) => b.addEventListener('c
 }));
 ${expandJs}
 ${ctxJs}
+${timeJs}
 ${reviewJs}
+${refreshJs}
 ${infoJs}
 </script>
 </body>
@@ -752,5 +935,32 @@ details.ops pre { font-size: 11px; overflow-x: auto; }
 #approve:disabled { background: var(--card); color: var(--muted); border: 1px solid var(--border); cursor: not-allowed; }
 #request { background: none; color: var(--del-fg); border: 1px solid var(--del-fg); border-radius: 6px; padding: 8px 18px; font: inherit; font-weight: 600; cursor: pointer; }
 #approve:hover:not(:disabled), #request:hover { filter: brightness(1.1); }
-.done { display: flex; align-items: center; justify-content: center; height: 80vh; font-size: 16px; color: var(--muted); padding: 20px; text-align: center; }
+.done { display: flex; flex-direction: column; gap: 14px; align-items: center; justify-content: center; min-height: 80vh; font-size: 16px; color: var(--muted); padding: 20px; text-align: center; }
+.done h2 { margin: 0; font-size: 17px; color: var(--fg); }
+.done-bad h2 { color: var(--del-fg); }
+.done pre { text-align: left; font: 12px/1.6 ui-monospace, monospace; background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; max-width: 900px; width: 100%; overflow-x: auto; white-space: pre-wrap; }
+.done a { color: var(--accent); font-size: 13px; }
+/* A proposal's own page: header, description and review comments. */
+.crumb { font-size: 12px; color: var(--muted); text-decoration: none; }
+.crumb:hover { color: var(--accent); }
+.pstate { font-size: 11px; font-weight: 600; padding: 2px 9px; border-radius: 10px; vertical-align: middle; margin-left: 6px; white-space: nowrap; }
+.pstate-wait { background: var(--accent); color: #fff; }
+.pstate-ok { background: var(--add-bg); color: var(--add-fg); }
+.pstate-warn { color: var(--warn); border: 1px solid var(--warn); }
+.pstate-error { background: var(--del-bg); color: var(--del-fg); }
+.pstate-muted { background: var(--card); color: var(--muted); border: 1px solid var(--border); }
+.banner { padding: 8px 20px; font-size: 13px; border-top: 1px solid var(--border); white-space: pre-line; }
+.banner-info { background: var(--card); color: var(--muted); }
+.banner-warn { color: var(--warn); }
+.banner-error { background: var(--del-bg); color: var(--del-fg); }
+.pdesc, .pcomments { max-width: 980px; margin: 14px auto 0; padding: 0 20px; }
+.md table { border-collapse: collapse; margin: 8px 0; }
+.md th, .md td { border: 1px solid var(--border); padding: 3px 10px; text-align: left; }
+.md th { background: var(--card); }
+.pdesc > :first-child { margin-top: 0; }
+.pdesc > :last-child { margin-bottom: 0; }
+.rcomment { border: 1px solid var(--warn); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; font-size: 13px; white-space: pre-wrap; }
+.notebar textarea.note, #overall { display: block; resize: vertical; min-height: 30px; font-family: inherit; line-height: 1.5; }
+#overall { flex: 1; min-width: 0; background: var(--bg); border: 1px solid var(--border); color: var(--fg); border-radius: 6px; padding: 5px 10px; font-size: 13px; }
+#request:disabled { opacity: .5; cursor: not-allowed; }
 `;

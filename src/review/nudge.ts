@@ -1,47 +1,26 @@
 /**
- * Keeping the push handoff from being dropped.
+ * What `jt push` says once a proposal is submitted.
  *
- * `jt push` and `jt await` are two halves of one obligation: push serves the page,
- * await collects the human's decision. Between them sits an agent whose contract
- * (SKILL.md) may be hundreds of turns back in its context — far enough that the second
- * half quietly goes missing, leaving the human staring at an unopened URL and the agent
- * reporting a push that never happened.
- *
- * Documentation cannot fix that on its own; recency can. So push restates what is still
- * owed in its own output, at the moment it creates the obligation. Advisory text only:
- * nothing here changes exit codes or control flow.
+ * The reader is usually an agent, and possibly one whose copy of the contract
+ * (SKILL.md) is hundreds of turns back in its context — or predates this flow
+ * altogether, from when a push meant opening a page and waiting on it. Documentation
+ * cannot fix that on its own; recency can. So push restates, at the moment it matters,
+ * what the agent now does and what it must not. Advisory text only: nothing here
+ * changes exit codes or control flow.
  */
-import { DEFAULT_PROPOSAL, proposalFlag } from "../proposal.ts";
+import { proposalFlag } from "../proposal.ts";
 import { bold, dim, yellow } from "../render/colors.ts";
 
-/**
- * The OS opener that hands a served page to the human — for the agent to run, not us.
- * `jt` deliberately does not open the page itself: spawning the opener from inside jt
- * proved unreliable under the non-TTY, sandboxed environments agents run in, whereas
- * the agent invoking it directly works. Printing the exact command is the reliable path.
- */
-export function openerCommand(url: string): string {
-  switch (Deno.build.os) {
-    case "darwin":
-      return `open '${url}'`;
-    case "windows":
-      return `start "" "${url}"`;
-    default:
-      return `xdg-open '${url}'`;
-  }
-}
-
-/** Printed by jt push directly under the URL: what is still owed, in order. */
-export function pushHandoffNotice(url: string, proposal: string = DEFAULT_PROPOSAL): string {
+/** Printed directly under the proposal's link. */
+export function submittedNotice(proposal: string): string {
   const flag = proposalFlag(proposal);
   return [
-    yellow(bold("NOT DONE — nothing has been sent to Jira yet. Two steps remain:")),
-    `  1. open the review page for the user:  ${bold(openerCommand(url))}`,
-    `  2. collect their decision:             ${bold(`jt await${flag}`)}`,
-    dim("     blocks until they decide, then reports the outcome exactly once — exit"),
-    dim("     0 pushed · 2 changes requested · 1 stale/failed/cancelled. Run it as a"),
-    dim("     background task if your harness supports one."),
-    yellow("Do not report this push as finished, and do not move on to other work,"),
-    yellow(`until jt await${flag} returns. jt cancel${flag} withdraws the review if plans change.`),
+    yellow(bold("SUBMITTED — nothing has been sent to Jira. The user approves it on that page, whenever")),
+    yellow(bold("they get to it, and that is what sends it.")),
+    "  agent: give the user the link in your reply, with a line on what the proposal does.",
+    "         That is the end of your part: you may finish your turn.",
+    dim("         Do not open the link for them, do not fetch or drive the page, and do not wait"),
+    dim(`         on the review. (Only if the user asks you to wait: jt await${flag}.)`),
+    dim("  later: jt proposals shows whether it was pushed, or which changes the user asked for."),
   ].join("\n");
 }

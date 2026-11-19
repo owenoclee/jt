@@ -6,7 +6,7 @@ import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/a
 import { join } from "@std/path";
 import { cmdCommit } from "../src/commands/commit.ts";
 import { cmdArchive, cmdRestore, cmdStatus, cmdUncommit } from "../src/commands/local.ts";
-import { cmdProposals } from "../src/commands/proposals.ts";
+import { cmdProposals, type ProposalsJson } from "../src/commands/proposals.ts";
 import { cmdPush } from "../src/commands/push.ts";
 import { cmdAwait, cmdCancel } from "../src/commands/review.ts";
 import { UserError } from "../src/errors.ts";
@@ -220,6 +220,118 @@ Deno.test({
 
         const journal = ws.store().listJournal().map((j) => `${j.entry.proposal}: ${j.entry.title}`).sort();
         assertEquals(journal, ["a: Agent a's rename", "b: Agent b's rename"]);
+      });
+    });
+  },
+});
+
+Deno.test({
+  name: "jt proposals --json: the same facts as one document, through a review's whole life",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async (t) => {
+    await withWorkspace(["First", "Second"], async (ws) => {
+      /** Everything the command printed must be the one document — a script parses stdout whole. */
+      const json = async (proposal: string | null = null): Promise<ProposalsJson> => {
+        ws.logs.length = 0;
+        await ws.as(proposal, () => cmdProposals(["--json"]));
+        assertEquals(ws.logs.length, 1, "exactly one thing is printed");
+        return JSON.parse(ws.logs[0]);
+      };
+
+      await t.step("nothing staged is an empty document, not a sentence", async () => {
+        assertEquals(await json(), { proposals: [], recentPushes: [] });
+      });
+
+      await t.step("a draft: staged, never submitted", async () => {
+        const store = ws.store();
+        const first = store.readWorking("TST-1")!.ticket;
+        store.writeWorking("TST-1", { ...first, summary: "First, renamed" });
+        const { key: _key, ...unkeyed } = first;
+        store.writeWorking("@follow-up", { ...unkeyed, summary: "A follow-up" });
+        await ws.as("tidy", () => cmdCommit(["TST-1", "@follow-up", "-m", "rename, and a follow-up"]));
+        await ws.as("tidy", () => cmdArchive(["TST-2"])); // staged, but not committed
+
+        assertEquals(await json(), {
+          proposals: [{
+            name: "tidy",
+            current: false,
+            status: "draft",
+            waitingOn: "agent",
+            title: null,
+            description: null,
+            url: null,
+            submittedAt: null,
+            tickets: [
+              { id: "@follow-up", change: "create", committed: true, leftover: false },
+              { id: "TST-1", change: "update", committed: true, leftover: false },
+              { id: "TST-2", change: "archive", committed: false, leftover: false },
+            ],
+            changesRequestedAt: null,
+            comments: [],
+            blocked: null,
+            partlyPushedAt: null,
+          }],
+          recentPushes: [],
+        });
+        assertEquals((await json("tidy")).proposals[0].current, true, "-p marks the row it names");
+        await ws.as("tidy", () => cmdRestore(["TST-2"]));
+      });
+
+      await t.step("in review: the user's move, at its link", async () => {
+        await ws.as("tidy", () => cmdPush(["--title", "Tidy the backlog", "--description", "Two **small** things."]));
+        const [p] = (await json()).proposals;
+        assertEquals(p.status, "in-review");
+        assertEquals(p.waitingOn, "user");
+        assertEquals(p.title, "Tidy the backlog");
+        assertEquals(p.description, "Two **small** things.");
+        assertEquals(p.url, "http://127.0.0.1:5472/p/TST/tidy");
+        assertEquals(p.submittedAt, ws.store("tidy").readMeta()!.submittedAt);
+        assert(p.submittedAt, "the submission is timestamped");
+      });
+
+      await t.step("changes requested: the comments, and where each was made", async () => {
+        await ws.decide("tidy", "request-changes", [
+          { on: "TST-1", body: 'Call it "First (renamed)" instead.' },
+          { body: "Otherwise fine." },
+        ]);
+        const [p] = (await json()).proposals;
+        assertEquals(p.status, "changes-requested");
+        assertEquals(p.waitingOn, "agent");
+        assertEquals(p.comments, [
+          { on: "TST-1", body: 'Call it "First (renamed)" instead.' },
+          { on: null, body: "Otherwise fine." },
+        ]);
+        assertEquals(p.changesRequestedAt, ws.store("tidy").readMeta()!.review!.decidedAt);
+        assertEquals(p.submittedAt, null, "it is no longer in review");
+        assertEquals(p.url, "http://127.0.0.1:5472/p/TST/tidy", "the link does not change");
+      });
+
+      await t.step("revised after submitting: the agent's move again, comments answered", async () => {
+        await ws.as("tidy", () => cmdPush([]));
+        const store = ws.store();
+        store.writeWorking("TST-1", { ...store.readWorking("TST-1")!.ticket, summary: "First (renamed)" });
+        await ws.as("tidy", () => cmdCommit(["TST-1"]));
+        const [p] = (await json()).proposals;
+        assertEquals(p.status, "revising");
+        assertEquals(p.waitingOn, "agent");
+        assertEquals(p.comments, [], "a resubmission answers the review");
+        assertEquals(p.changesRequestedAt, null);
+      });
+
+      await t.step("approved: off the list, and in the week's pushes with the keys it created", async () => {
+        await ws.as("tidy", () => cmdPush([]));
+        await ws.decide("tidy", "approve");
+        const doc = await json();
+        assertEquals(doc.proposals, []);
+        assertEquals(doc.recentPushes.length, 1);
+        const [pushed] = doc.recentPushes;
+        assertEquals(pushed.proposal, "tidy");
+        assertEquals(pushed.title, "Tidy the backlog");
+        assertEquals(pushed.result, "success");
+        assertEquals(pushed.created, { "@follow-up": "TST-3" });
+        assertEquals(pushed.pushedAt, ws.store().listJournal()[0].entry.startedAt);
+        assertEquals(ws.mock.issues.get("TST-1")!.summary, "First (renamed)");
       });
     });
   },

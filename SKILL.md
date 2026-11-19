@@ -394,6 +394,7 @@ jt show --web [KEY...]
 jt diff --web
 jt changes --web
 jt proposals                    # every proposal: state, link, review comments, recent pushes
+jt proposals --json             # the same facts as JSON, for a script; read the text form yourself
 jt log                          # the last ten pushes
 jt log --today                  # everything sent to Jira today
 jt log --since 3d PROJ-123      # a window (90m, 12h, 3d, 2w, or a date) and/or tickets

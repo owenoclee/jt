@@ -49,6 +49,7 @@ export const SHIPPED_SKILLS: Readonly<Record<string, string>> = {
   "a261cafe3d43ba097efac5aeafb27ece183ae837b84afad2dab4cea1b6ab95ef": "0.6.0-rc.1",
   "b3ca85bd394a2fcd4ebed945b6f73363a183a211cc26709a35e1ed58de22cc1d": "0.6.0-rc.4",
   "0b9ecfb7745d63c99abbcd7ea23202031fc66328e89474f6527f4bb783444028": "0.7.0-rc.1",
+  "fc26019c1a4d4f361bc4e9fea833ce9c9d9b8e49d2fc898453cb773de9623486": "0.7.0-rc.2",
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;

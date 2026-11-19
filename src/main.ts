@@ -94,10 +94,11 @@ const USAGE = `${bold("jt")} — Jira tickets as local files (fetch → edit →
                             A ticket is held by one proposal at a time. With no name,
                             commands use the default proposal. jt commit -p NAME takes
                             explicit ids (with none: new edits to tickets NAME holds)
-    jt proposals            every proposal: what is staged, where its review stands,
+    jt proposals [--json]   every proposal: what is staged, where its review stands,
                             the comments the user left when asking for changes, and
                             what was approved and pushed lately. Start here when
-                            picking work back up
+                            picking work back up. --json prints the same facts as one
+                            JSON document, for a script rather than for you
 
   push (submit for review — the user's approval is what sends it to Jira)
     jt push [-p NAME] --title 'what it does' [--description MD | --description-file F]
@@ -230,7 +231,7 @@ async function dispatch(argv: string[]): Promise<void> {
     case "log":
       return cmdLog(rest);
     case "proposals":
-      return cmdProposals();
+      return cmdProposals(rest);
     case "skill":
       return cmdSkill(rest);
     case "schema":

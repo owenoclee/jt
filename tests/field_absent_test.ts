@@ -102,6 +102,12 @@ Deno.test("a partial push leaves no phantom field change behind", async () => {
     ws.logs.length = 0;
     cmdProposals();
     assertStringIncludes(ws.logs.join("\n"), "partly pushed on");
+    ws.logs.length = 0;
+    cmdProposals(["--json"]);
+    const [stuck] = JSON.parse(ws.logs[0]).proposals;
+    assertEquals(stuck.status, "partly-pushed");
+    assertEquals(stuck.tickets, [{ id: "TST-1", change: "update", committed: true, leftover: true }]);
+    assertEquals(stuck.partlyPushedAt, store.lastPush()!.startedAt);
 
     // The retry sends what was left — the transition — and nothing else: still
     // auto-allowed, and no PUT clearing a field that never had a value.

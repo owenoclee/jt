@@ -132,6 +132,75 @@ It reads your API token the same way every `jt` command does. If you keep the to
 `JIRA_API_TOKEN` rather than the credentials file, the server holds the value from the
 shell that started it: after rotating the token, `jt serve --stop` and let it restart.
 
+### Proposals as JSON
+
+`jt proposals --json` prints the same facts as one JSON document, for a status line, a
+dashboard, or a script watching what its agents have submitted:
+
+```json
+{
+  "proposals": [
+    {
+      "name": "auth-cleanup",
+      "current": false,
+      "status": "changes-requested",
+      "waitingOn": "agent",
+      "title": "Tighten session handling before the audit",
+      "description": "Sessions outlive the audit's 12-hour limit.",
+      "url": "http://127.0.0.1:5472/p/ENG/auth-cleanup",
+      "submittedAt": null,
+      "tickets": [
+        { "id": "ENG-12", "change": "update", "committed": true, "leftover": false },
+        { "id": "@audit-epic", "change": "create", "committed": true, "leftover": false }
+      ],
+      "changesRequestedAt": "2026-11-19T09:14:02.118Z",
+      "comments": [
+        { "on": "ENG-12", "body": "Keep the old timeout for service accounts." },
+        { "on": null, "body": "Otherwise good." }
+      ],
+      "blocked": null,
+      "partlyPushedAt": null
+    }
+  ],
+  "recentPushes": [
+    {
+      "proposal": "q3-epics",
+      "title": "Q3 platform epics",
+      "result": "success",
+      "pushedAt": "2026-11-18T16:40:11.902Z",
+      "created": { "@q3-epic": "ENG-140" }
+    }
+  ]
+}
+```
+
+Every key is always present; one that does not apply is `null` or an empty list. Only
+the document goes to stdout: notices, such as an available update, go to stderr.
+
+| `status`            | Meaning                                                          | `waitingOn` |
+| ------------------- | ---------------------------------------------------------------- | ----------- |
+| `draft`             | staged, but not submitted for review (never, or withdrawn)       | `agent`     |
+| `in-review`         | submitted and waiting for you; `submittedAt` says since when     | `user`      |
+| `revising`          | changed since it was submitted; needs `jt push` again            | `agent`     |
+| `changes-requested` | you asked for changes; `comments` holds what you wrote           | `agent`     |
+| `blocked`           | cannot be reviewed as it stands; `blocked.reason` says why       | `agent`     |
+| `pushing`           | approved, and being sent to Jira now                             | `null`      |
+| `interrupted`       | the review server stopped while sending an approved push         | `agent`     |
+| `partly-pushed`     | a push stopped at a failure and left changes staged              | `agent`     |
+| `legacy-review`     | a review opened by jt 0.6 or earlier is still pending            | `agent`     |
+
+- `current` marks the proposal the command was run for (`-p NAME`, or the default).
+- `url` is `null` until the workspace has submitted its first proposal.
+- `tickets[].change` is `create`, `update`, `archive`, `unarchive` or `delete`. `committed`
+  is `false` for an archive, un-archive or deletion staged but not yet committed.
+  `leftover` marks a change that a push stopped before sending; `partlyPushedAt` is when
+  that push happened.
+- A comment's `on` is the ticket it was made under, or `null` for one on the proposal as
+  a whole.
+- `recentPushes` is every approved push of the last seven days whose proposal is no
+  longer open, newest first. `result` is `success`, or `partial` for a push that stopped
+  at a failure; `created` maps each new ticket's `@name` to the key Jira gave it.
+
 ## Parallel agents: one proposal each
 
 A proposal is a named changeset — its own staged tickets, its own link, its own
